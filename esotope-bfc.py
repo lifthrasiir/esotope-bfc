@@ -207,8 +207,8 @@ class Compiler(object):
                     adjustnode[0] = 0
                     for k in adjustnode.changes.keys():
                         adjustnode[k] *= mult
-                    inodes.append(SetCurrent(0))
                     inodes.append(adjustnode)
+                    inodes.append(SetCurrent(0))
                     continue
 
             if isinstance(inode, ComplexNode):
