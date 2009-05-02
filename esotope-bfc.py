@@ -378,21 +378,24 @@ class Compiler(object):
 
         changes = node.changes
         backrefs = {}
+        usedrefs = {}
 
         i = 0
         while i < len(changes):
             k, set, v = changes[i]
             vrefs = v.references()
 
-            # let previ be backrefs[i]. we can merge changes[previ] and changes[i]
-            # if previ is greater than backrefs[j] for every cell j in vrefs.
-            # if not, at the point of previ some cells in vrefs are not current yet.
-            #
-            # since merger with backrefs[i] is the *only* possible one, if this
-            # condition doesn't hold we should make this one to backrefs[i].
+            # we can merge changes[previ] and changes[i] if:
+            # - no operation changed cell k between them. (and such previ is
+            #   backrefs[i], as it is updated after change)
+            # - no operation referenced cell k between them. it includes
+            #   changes[previ] which is self-reference (like a = a + 4).
+            # - no operation changed cell k' which is referenced by v.
+            #   it includes changes[previ] too, if v references previous k.
 
-            if k in backrefs and vrefs and \
-                    backrefs[k] >= max(backrefs.get(j, 0) for j in vrefs):
+            if k in backrefs and \
+                    backrefs[k] > usedrefs.get(k, -1) and \
+                    (not vrefs or backrefs[k] > min(backrefs.get(j, -1) for j in vrefs)):
                 previ = backrefs[k]
                 if set:
                     changes[previ] = (k, True, v)
@@ -400,9 +403,14 @@ class Compiler(object):
                     _, prevset, prevvalue = changes[previ]
                     changes[previ] = (k, prevset, prevvalue + v)
                 del changes[i]
+                i -= 1 # cancels i += 1 below.
             else:
                 backrefs[k] = i
-                i += 1
+
+            for usedk in vrefs:
+                usedrefs[usedk] = i
+
+            i += 1
 
         return node
 
