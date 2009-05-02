@@ -70,6 +70,8 @@ class Expr(object):
             self.root = obj
 
     def __neg__(self):
+        if isinstance(self.root, Expr.Negate): return Expr(self.root.expr)
+        if isinstance(self.root, Expr.Number): return Expr(-self.root.value)
         return Expr(Expr.Negate(self.root))
 
     def __pos__(self):
@@ -103,6 +105,18 @@ class Expr(object):
 
     def __eq__(self, rhs): return self.root == Expr(rhs).root
     def __ne__(self, rhs): return self.root != Expr(rhs).root
+    def __lt__(self, rhs):
+        try: return self.root.value < Expr(rhs).root.value
+        except: return False
+    def __le__(self, rhs):
+        try: return self.root.value <= Expr(rhs).root.value
+        except: return False
+    def __gt__(self, rhs):
+        try: return self.root.value > Expr(rhs).root.value
+        except: return False
+    def __ge__(self, rhs):
+        try: return self.root.value >= Expr(rhs).root.value
+        except: return False
 
     def references(self):
         def func(node):
@@ -114,6 +128,12 @@ class Expr(object):
         def func(node):
             if not isinstance(node, Expr.MemoryRef): return node
             return Expr.MemoryRef(node.offset + delta)
+        return Expr(self.root.apply(func))
+
+    def setmemory(self, map):
+        def func(node):
+            if not isinstance(node, Expr.MemoryRef): return node
+            return map.get(node.offset, node)
         return Expr(self.root.apply(func))
 
     def __str__(self):
@@ -175,7 +195,7 @@ class Program(ComplexNode):
 class MemoryOps(Node):
     def __init__(self, changes=None, offset=0):
         try:
-            self.changes = [(k, False, v) for k, v in changes.items()]
+            self.changes = [(k, False, Expr(v)) for k, v in changes.items()]
         except:
             self.changes = changes or []
         self.offset = offset
@@ -183,20 +203,23 @@ class MemoryOps(Node):
     def __nonzero__(self):
         return len(self.changes) > 0 or self.offset != 0
 
-    def get(self, offset):
-        value = Expr[offset]
+    def propagate(self):
+        exprs = {}
         for k, set, v in self.changes:
-            if k == offset:
-                if set: value = v
-                else: value += v
-        return value
+            v = v.setmemory(exprs)
+            if set:
+                exprs[k] = (True, v)
+            else:
+                prevset, prevvalue = exprs.get(k, (False, 0))
+                exprs[k] = (prevset, prevvalue + v)
+        return exprs
 
     def set(self, offset, value):
-        self.changes.append((offset, False, value))
+        self.changes.append((offset, True, Expr(value)))
 
     def adjust(self, offset, delta):
         if delta != 0:
-            self.changes.append((offset, True, delta))
+            self.changes.append((offset, False, Expr(delta)))
 
     def combine(self, next):
         if isinstance(next, MemoryOps):
@@ -230,14 +253,10 @@ class MemoryOps(Node):
             if set:
                 items.append('%d=%s' % (k, v))
             elif v < 0:
-                items.append('%d+=%s' % (k, v))
+                items.append('%d-=%s' % (k, -v))
             elif v != 0:
-                items.append('%d-=%s' % (k, v))
-        str = ', '.join(items)
-        if self.offset != 0:
-            if str: str += '; '
-            str += repr(self.offset)
-        return 'MemoryOps[%s]' % str
+                items.append('%d+=%s' % (k, v))
+        return 'MemoryOps[%s; %r]' % (', '.join(items), self.offset)
 
 class Input(Node):
     def __str__(self):
@@ -305,6 +324,7 @@ class Compiler(object):
         return nodestack[0]
 
     # tries to optimize tight loop: LoopWhile[MemoryOps[0+=1/0-=1, ...; 0]].
+    # every value of ops should be simple expression such as 4 or -3.
     def optimize_tightloop(self, node):
         if not isinstance(node, ComplexNode):
             return node
@@ -315,21 +335,26 @@ class Compiler(object):
         for inode in node[:]:
             if isinstance(inode, LoopWhile) and len(inode) == 1 and \
                     isinstance(inode[0], MemoryOps) and inode[0].offset == 0:
-                adjustnode = inode[0]
-                if adjustnode[0] == 1:
-                    mult = overflow - Expr[0]
-                elif adjustnode[0] == -1:
-                    mult = Expr[0]
-                else:
-                    mult = None
+                ops = inode[0]
+                changes = ops.propagate()
 
-                if mult is not None:
-                    adjustnode[0] = 0
-                    for k in adjustnode.changes.keys():
-                        adjustnode[k] *= mult
-                    inodes.append(adjustnode)
-                    inodes.append(SetCurrent(0))
-                    continue
+                setflag, delta = changes.get(0, (False, 0))
+                mult = None
+                if not setflag:
+                    if delta == 1:
+                        mult = overflow - Expr[0]
+                    elif delta == -1:
+                        mult = Expr[0]
+
+                if mult is not None and \
+                        all(isinstance(v.root, Expr.Number) for set, v in changes.values()):
+                    mergedchanges = []
+                    for k, (set, v) in changes.items():
+                        if k != 0:
+                            if set: mergedchanges.append((k, True, v))
+                            else: mergedchanges.append((k, False, v * mult))
+                    inode = MemoryOps(mergedchanges, ops.offset)
+                    inode.set(0, 0)
 
             if isinstance(inode, ComplexNode):
                 inodes.append(self.optimize_tightloop(inode))
@@ -347,7 +372,7 @@ def main(argv):
 
     compiler = Compiler()
     node = compiler.parse(file(argv[1], 'r'))
-    #node = compiler.optimize_tightloop(node)
+    node = compiler.optimize_tightloop(node)
     print node
     return 0
 
