@@ -37,20 +37,43 @@ class Node_Program(ComplexNode):
     def __repr__(self):
         return 'Program%r' % self.children
 
-class Node_MemDelta(Node):
-    def __init__(self, delta):
-        self.delta = delta
+class Node_AdjustMemory(Node):
+    def __init__(self, changes=None):
+        if changes:
+            self.changes = dict(changes)
+            for k, v in self.changes.items():
+                if v == 0: del self.changes[k]
+        else:
+            self.changes = {}
+
+    def __getitem__(self, offset):
+        return self.changes.get(offset, 0)
+
+    def __setitem__(self, offset, delta):
+        if delta == 0:
+            try: del self.changes[offset]
+            except KeyError: pass
+        else:
+            self.changes[offset] = delta
 
     def __str__(self):
-        if self.delta < 0:
-            return '*mptr -= %s;\n' % -self.delta
-        elif self.delta != 0:
-            return '*mptr += %s;\n' % self.delta
+        codes = []
+        for k, v in self.changes.items():
+            if k == 0:
+                target = '*mptr'
+            else:
+                target = 'mptr[%d]' % k
+            if v < 0:
+                codes.append('%s -= %s;\n' % (target, -v))
+            elif v != 0:
+                codes.append('%s += %s;\n' % (target, v))
+        return ''.join(codes)
 
     def __repr__(self):
-        return 'MemDelta[%r]' % self.delta
+        items = sorted(self.changes.items())
+        return 'AdjustMemory[%s]' % ', '.join('%d:%r' % (k,v) for k, v in items)
 
-class Node_PtrDelta(Node):
+class Node_MovePointer(Node):
     def __init__(self, delta):
         self.delta = delta
 
@@ -61,7 +84,7 @@ class Node_PtrDelta(Node):
             return 'mptr += %s;\n' % self.delta
 
     def __repr__(self):
-        return 'PtrDelta[%r]' % self.delta
+        return 'MovePointer[%r]' % self.delta
 
 class Node_Input(Node):
     def __str__(self):
@@ -90,49 +113,42 @@ class Parser(object):
     def parse(self, fp):
         nodestack = [Node_Program()]
 
-        lastmemdelta = 0
-        lastptrdelta = 0
+        memchanges = {}
+        ptroffset = 0
         for lineno, line in enumerate(fp):
             for ch in line:
-                if ch not in '+-><.,[]': continue
-
-                # simple optimization:
-                # combine ++++ and ---- into one single memdelta node.
-                # combine >>>> and <<<< into one single ptrdelta node.
-
-                if ch not in '+-' and lastmemdelta != 0:
-                    assert lastptrdelta == 0
-                    nodestack[-1].append(Node_MemDelta(lastmemdelta))
-                    lastmemdelta = 0
-                if ch not in '><' and lastptrdelta != 0:
-                    assert lastmemdelta == 0
-                    nodestack[-1].append(Node_PtrDelta(lastptrdelta))
-                    lastptrdelta = 0
-
                 if ch == '+':
-                    lastmemdelta += 1
+                    memchanges[ptroffset] = memchanges.get(ptroffset, 0) + 1
                 elif ch == '-':
-                    lastmemdelta -= 1
+                    memchanges[ptroffset] = memchanges.get(ptroffset, 0) - 1
                 elif ch == '>':
-                    lastptrdelta += 1
+                    ptroffset += 1
                 elif ch == '<':
-                    lastptrdelta -= 1
-                elif ch == '.':
-                    nodestack[-1].append(Node_Output())
-                elif ch == ',':
-                    nodestack[-1].append(Node_Input())
-                elif ch == '[':
-                    nodestack.append(Node_LoopWhile())
-                elif ch == ']':
-                    if len(nodestack) < 2:
-                        raise ValueError('Not matching ] at line %d' % (lineno+1))
-                    loop = nodestack.pop()
-                    nodestack[-1].append(loop)
+                    ptroffset -= 1
+                elif ch in '.,[]':
+                    if any(memchanges.values()):
+                        nodestack[-1].append(Node_AdjustMemory(memchanges))
+                    if ptroffset != 0:
+                        nodestack[-1].append(Node_MovePointer(ptroffset))
+                    memchanges = {}
+                    ptroffset = 0
 
-        if lastmemdelta != 0:
-            nodestack[-1].append(Node_MemDelta(lastmemdelta))
-        if lastptrdelta != 0:
-            nodestack[-1].append(Node_PtrDelta(lastptrdelta))
+                    if ch == '.':
+                        nodestack[-1].append(Node_Output())
+                    elif ch == ',':
+                        nodestack[-1].append(Node_Input())
+                    elif ch == '[':
+                        nodestack.append(Node_LoopWhile())
+                    else:
+                        if len(nodestack) < 2:
+                            raise ValueError('Not matching ] at line %d' % (lineno+1))
+                        loop = nodestack.pop()
+                        nodestack[-1].append(loop)
+
+        if any(memchanges.values()):
+            nodestack[-1].append(Node_AdjustMemory(memchanges))
+        if ptroffset != 0:
+            nodestack[-1].append(Node_MovePointer(ptroffset))
         if len(nodestack) != 1:
             raise ValueError('Premature end of the loop')
 
