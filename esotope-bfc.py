@@ -251,11 +251,11 @@ class MemoryOps(Node):
         items = []
         for k, set, v in self.changes:
             if set:
-                items.append('%d=%s' % (k, v))
+                items.append('%d=%r' % (k, v))
             elif v < 0:
-                items.append('%d-=%s' % (k, -v))
+                items.append('%d-=%r' % (k, -v))
             elif v != 0:
-                items.append('%d+=%s' % (k, v))
+                items.append('%d+=%r' % (k, v))
         return 'MemoryOps[%s; %r]' % (', '.join(items), self.offset)
 
 class Input(Node):
@@ -365,6 +365,47 @@ class Compiler(object):
         node.cleanup()
         return node
 
+    # dead code elimination and constant propagation.
+    # TODO: should use better algorithm.
+    def optimize_propagate(self, node):
+        if isinstance(node, ComplexNode):
+            for i in xrange(len(node)):
+                node[i] = self.optimize_propagate(node[i])
+            node.cleanup()
+            return node
+        elif not isinstance(node, MemoryOps):
+            return node
+
+        changes = node.changes
+        backrefs = {}
+
+        i = 0
+        while i < len(changes):
+            k, set, v = changes[i]
+            vrefs = v.references()
+
+            # let previ be backrefs[i]. we can merge changes[previ] and changes[i]
+            # if previ is greater than backrefs[j] for every cell j in vrefs.
+            # if not, at the point of previ some cells in vrefs are not current yet.
+            #
+            # since merger with backrefs[i] is the *only* possible one, if this
+            # condition doesn't hold we should make this one to backrefs[i].
+
+            if k in backrefs and vrefs and \
+                    backrefs[k] >= max(backrefs.get(j, 0) for j in vrefs):
+                previ = backrefs[k]
+                if set:
+                    changes[previ] = (k, True, v)
+                else:
+                    _, prevset, prevvalue = changes[previ]
+                    changes[previ] = (k, prevset, prevvalue + v)
+                del changes[i]
+            else:
+                backrefs[k] = i
+                i += 1
+
+        return node
+
 def main(argv):
     if len(argv) < 2:
         print >>sys.stderr, 'Usage: %s filename' % argv[0]
@@ -373,6 +414,7 @@ def main(argv):
     compiler = Compiler()
     node = compiler.parse(file(argv[1], 'r'))
     node = compiler.optimize_tightloop(node)
+    node = compiler.optimize_propagate(node)
     print node
     return 0
 
