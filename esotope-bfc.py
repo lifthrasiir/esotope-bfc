@@ -16,6 +16,9 @@ class Expr(object):
     __slots__ = ['root']
 
     class _exprbase(tuple):
+        def __new__(cls, *args):
+            if not args: raise TypeError('empty arguments')
+            return tuple.__new__(cls, args)
         def __eq__(self, rhs):
             return self.__class__ is rhs.__class__ and tuple.__eq__(self, rhs)
         def __ne__(self, rhs):
@@ -37,26 +40,26 @@ class Expr(object):
         def apply(self, func, merge=None):
             return (merge or Expr.Negate)(self.expr.apply(func, merge))
 
-    class Add(namedtuple('Add', 'lhs rhs'), _exprbase):
-        def __str__(self): return '(%s + %s)' % (self.lhs, self.rhs)
-        def __repr__(self): return '(%r+%r)' % (self.lhs, self.rhs)
-        def apply(self, func, merge=None):
-            return (merge or Expr.Add)(self.lhs.apply(func, merge),
-                    self.rhs.apply(func, merge))
+    class Sum(_exprbase):
+        def _prettify(self, func):
+            items = [func(self[0])]
+            for child in self[1:]:
+                if isinstance(child, Expr.Negate):
+                    items.extend(['-', func(child.expr)])
+                else:
+                    items.extend(['+', func(child)])
+            return items
 
-    class Subtract(namedtuple('Subtract', 'lhs rhs'), _exprbase):
-        def __str__(self): return '(%s - %s)' % (self.lhs, self.rhs)
-        def __repr__(self): return '(%r-%r)' % (self.lhs, self.rhs)
+        def __str__(self): return '(%s)' % ' '.join(self._prettify(str))
+        def __repr__(self): return '(%s)' % ''.join(self._prettify(repr))
         def apply(self, func, merge=None):
-            return (merge or Expr.Subtract)(self.lhs.apply(func, merge),
-                    self.rhs.apply(func, merge))
+            return (merge or Expr.Sum)(*[i.apply(func, merge) for i in self])
 
-    class Multiply(namedtuple('Multiply', 'lhs rhs')):
-        def __str__(self): return '(%s * %s)' % (self.lhs, self.rhs)
-        def __repr__(self): return '(%r*%r)' % (self.lhs, self.rhs)
+    class Product(_exprbase):
+        def __str__(self): return '(%s)' % ' * '.join(map(str, self))
+        def __repr__(self): return '(%s)' % '*'.join(map(repr, self))
         def apply(self, func, merge=None):
-            return (merge or Expr.Multiply)(self.lhs.apply(func, merge),
-                    self.rhs.apply(func, merge))
+            return (merge or Expr.Product)(*[i.apply(func, merge) for i in self])
 
     def __init__(self, obj=0):
         if isinstance(obj, (int, long)):
@@ -74,31 +77,29 @@ class Expr(object):
 
     def __add__(self, rhs):
         if rhs == 0: return self
-        return Expr(Expr.Add(self.root, Expr(rhs).root))
+        return Expr(Expr.Sum(self.root, Expr(rhs).root))
 
     def __radd__(self, lhs):
         if lhs == 0: return self
-        return Expr(Expr.Add(Expr(lhs).root, self.root))
+        return Expr(Expr.Sum(Expr(lhs).root, self.root))
 
     def __sub__(self, rhs):
-        if rhs == 0: return self
-        return Expr(Expr.Subtract(self.root, Expr(rhs).root))
+        return self + (-rhs)
 
     def __rsub__(self, lhs):
-        if lhs == 0: return -self
-        return Expr(Expr.Subtract(Expr(lhs).root, self.root))
+        return lhs + (-self)
 
     def __mul__(self, rhs):
         if rhs == 0: return Expr()
         if rhs == 1: return self
         if rhs == -1: return -self
-        return Expr(Expr.Multiply(self.root, Expr(rhs).root))
+        return Expr(Expr.Product(self.root, Expr(rhs).root))
 
     def __rmul__(self, lhs):
         if lhs == 0: return Expr()
         if lhs == 1: return self
         if lhs == -1: return -self
-        return Expr(Expr.Multiply(Expr(lhs).root, self.root))
+        return Expr(Expr.Product(Expr(lhs).root, self.root))
 
     def __eq__(self, rhs): return self.root == Expr(rhs).root
     def __ne__(self, rhs): return self.root != Expr(rhs).root
@@ -171,13 +172,13 @@ class Program(ComplexNode):
     def __repr__(self):
         return self._repr('Program')
 
-class MemoryOps(Node, list):
-    def __init__(self, offset=0, changes=None):
-        self.offset = offset
+class MemoryOps(Node):
+    def __init__(self, changes=None, offset=0):
         try:
             self.changes = [(k, False, v) for k, v in changes.items()]
         except:
             self.changes = changes or []
+        self.offset = offset
 
     def __nonzero__(self):
         return len(self.changes) > 0 or self.offset != 0
@@ -225,16 +226,18 @@ class MemoryOps(Node, list):
 
     def __repr__(self):
         items = []
-        for k, set, v in sorted(self.changes.items()):
+        for k, set, v in self.changes:
             if set:
                 items.append('%d=%s' % (k, v))
             elif v < 0:
                 items.append('%d+=%s' % (k, v))
             elif v != 0:
                 items.append('%d-=%s' % (k, v))
+        str = ', '.join(items)
         if self.offset != 0:
-            items.append('offset=%r' % self.offset)
-        return 'MemoryOps[%s]' % ', '.join(items)
+            if str: str += '; '
+            str += repr(self.offset)
+        return 'MemoryOps[%s]' % str
 
 class Input(Node):
     def __str__(self):
@@ -278,7 +281,7 @@ class Compiler(object):
                     offset -= 1
                 elif ch in '.,[]':
                     if offset != 0 or any(changes.values()):
-                        nodestack[-1].append(MemoryOps(offset, changes))
+                        nodestack[-1].append(MemoryOps(changes, offset))
                     changes = {}
                     offset = 0
 
@@ -295,13 +298,13 @@ class Compiler(object):
                         nodestack[-1].append(loop)
 
         if offset != 0 or any(changes.values()):
-            nodestack[-1].append(MemoryOps(offset, changes))
+            nodestack[-1].append(MemoryOps(changes, offset))
         if len(nodestack) != 1:
             raise ValueError('Premature end of the loop')
 
         return nodestack[0]
 
-    # tries to optimize tight loop: LoopWhile[MemoryOps[0+=1/0-=1, ..., offset=0]].
+    # tries to optimize tight loop: LoopWhile[MemoryOps[0+=1/0-=1, ...; 0]].
     def optimize_tightloop(self, node):
         if not isinstance(node, ComplexNode):
             return node
