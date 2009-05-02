@@ -3,39 +3,67 @@
 # Copyright (c) 2009, Kang Seonghoon.
 
 import sys
+from collections import namedtuple
 from cStringIO import StringIO
 
 
+class _ExprMeta(type):
+    def __getitem__(self, offset):
+        return Expr(Expr.MemoryRef(offset))
+
 class Expr(object):
-    def __add__(self, rhs): return Add(self, rhs)
-    def __radd__(self, lhs): return Add(lhs, self)
-    def __sub__(self, rhs): return Subtract(self, rhs)
-    def __rsub__(self, lhs): return Subtract(lhs, self)
-    def __mul__(self, rhs): return Multiply(self, rhs)
-    def __rmul__(self, lhs): return Multiply(lhs, self)
+    __metaclass__ = _ExprMeta
+    __slots__ = ['root']
 
-    def __str__(self): raise NotImplemented('should be overriden')
-    def __repr__(self): raise NotImplemented('should be overriden')
+    class Number(namedtuple('Number', 'value')):
+        def __str__(self): return str(self.value)
+        def __repr__(self): return repr(self.value)
 
-class MemoryRef(Expr):
-    def __init__(self, offset): self.offset = offset
-    def __str__(self): return 'mptr[%s]' % self.offset
-    def __repr__(self): return 'mptr[%r]' % self.offset
+    class MemoryRef(namedtuple('MemoryRef', 'offset')):
+        def __str__(self): return 'mptr[%s]' % self.offset
+        def __repr__(self): return 'mptr[%r]' % self.offset
 
-class Add(Expr):
-    def __init__(self, lhs, rhs): self.lhs = lhs; self.rhs = rhs
-    def __str__(self): return '(%s + %s)' % (self.lhs, self.rhs)
-    def __repr__(self): return '(%r + %r)' % (self.lhs, self.rhs)
+    class Add(namedtuple('Add', 'lhs rhs')):
+        def __str__(self): return '(%s + %s)' % (self.lhs, self.rhs)
+        def __repr__(self): return '(%r+%r)' % (self.lhs, self.rhs)
 
-class Subtract(Expr):
-    def __init__(self, lhs, rhs): self.lhs = lhs; self.rhs = rhs
-    def __str__(self): return '(%s - %s)' % (self.lhs, self.rhs)
-    def __repr__(self): return '(%r - %r)' % (self.lhs, self.rhs)
+    class Subtract(namedtuple('Subtract', 'lhs rhs')):
+        def __str__(self): return '(%s - %s)' % (self.lhs, self.rhs)
+        def __repr__(self): return '(%r-%r)' % (self.lhs, self.rhs)
 
-class Multiply(Expr):
-    def __init__(self, lhs, rhs): self.lhs = lhs; self.rhs = rhs
-    def __str__(self): return '(%s * %s)' % (self.lhs, self.rhs)
-    def __repr__(self): return '(%r * %r)' % (self.lhs, self.rhs)
+    class Multiply(namedtuple('Multiply', 'lhs rhs')):
+        def __str__(self): return '(%s * %s)' % (self.lhs, self.rhs)
+        def __repr__(self): return '(%r*%r)' % (self.lhs, self.rhs)
+
+    def __init__(self, root):
+        if isinstance(root, (int, long)):
+            self.root = Expr.Number(root)
+        else:
+            self.root = root
+
+    def __add__(self, rhs):
+        if rhs == 0: return self
+        return Expr(Expr.Add(self.root, Expr(rhs).root))
+
+    def __radd__(self, lhs):
+        if lhs == 0: return self
+        return Expr(Expr.Add(Expr(lhs).root, self.root))
+
+    def __sub__(self, rhs):
+        return Expr(Expr.Subtract(self.root, Expr(rhs).root))
+    def __rsub__(self, lhs):
+        return Expr(Expr.Subtract(Expr(lhs).root, self.root))
+
+    def __mul__(self, rhs):
+        return Expr(Expr.Multiply(self.root, Expr(rhs).root))
+    def __rmul__(self, lhs):
+        return Expr(Expr.Multiply(Expr(lhs).root, self.root))
+
+    def __str__(self):
+        return str(self.root)
+
+    def __repr__(self):
+        return repr(self.root)
 
 
 def insert_indent(s):
@@ -43,6 +71,12 @@ def insert_indent(s):
     return '\t' + s.rstrip('\n').replace('\n', '\n\t') + '\n'
 
 class Node(object):
+    def __nonzero__(self):
+        return True # return True if this node is no-op.
+
+    def combine(self, next):
+        pass # return None or combined Node object.
+
     def __str__(self): raise NotImplemented('should be overriden')
     def __repr__(self): raise NotImplemented('should be overriden')
 
@@ -52,6 +86,18 @@ class ComplexNode(Node, list):
 
     def _repr(self, name):
         return name + list.__repr__(self)
+
+    def cleanup(self):
+        i = 1
+        while i < len(self):
+            if not self[i-1]:
+                del self[i-1]
+            elif self[i-1].combine(self[i]):
+                del self[i]
+            else:
+                i += 1
+        if self and not self[0]:
+            del self[0]
 
 class Program(ComplexNode):
     def __str__(self):
@@ -86,6 +132,9 @@ class AdjustMemory(Node):
         else:
             self.changes = {}
 
+    def __nonzero__(self):
+        return len(self.changes) > 0 or self.offset != 0
+
     def __getitem__(self, offset):
         assert isinstance(offset, (int, long))
         return self.changes.get(offset, 0)
@@ -97,6 +146,17 @@ class AdjustMemory(Node):
             except KeyError: pass
         else:
             self.changes[offset] = delta
+
+    def combine(self, next):
+        if isinstance(next, AdjustMemory):
+            for k, v in next.changes.items():
+                self[self.offset + k] += v
+            self.offset += next.offset
+            return True
+
+        if isinstance(next, SetCurrent):
+            self.offset
+            return False
 
     def __str__(self):
         codes = []
@@ -116,8 +176,11 @@ class AdjustMemory(Node):
 
     def __repr__(self):
         items = sorted(self.changes.items())
-        return 'AdjustMemory[offset=%r, %s]' % (
-                self.offset, ', '.join('%d:%r' % (k,v) for k, v in items))
+        if items:
+            return 'AdjustMemory[offset=%r, %s]' % (
+                    self.offset, ', '.join('%d:%r' % (k,v) for k, v in items))
+        else:
+            return 'AdjustMemory[offset=%r]' % self.offset
 
 class Input(Node):
     def __str__(self):
@@ -197,9 +260,9 @@ class Compiler(object):
                     isinstance(inode[0], AdjustMemory) and inode[0].offset == 0:
                 adjustnode = inode[0]
                 if adjustnode[0] == 1:
-                    mult = overflow - MemoryRef(0)
+                    mult = overflow - Expr[0]
                 elif adjustnode[0] == -1:
-                    mult = MemoryRef(0)
+                    mult = Expr[0]
                 else:
                     mult = None
 
@@ -217,6 +280,7 @@ class Compiler(object):
                 inodes.append(inode)
 
         node[:] = inodes
+        node.cleanup()
         return node
 
 def main(argv):
