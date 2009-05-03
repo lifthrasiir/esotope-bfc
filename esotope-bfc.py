@@ -314,6 +314,18 @@ class ComplexNode(Node, list):
 
         return set(i if i is None else i - offsets for i in updates)
 
+    def transforming(self):
+        replacement = [] # to be modifiable in the closure
+        def replace(*nodes): replacement[:] = nodes
+
+        i = 0
+        while i < len(self):
+            replacement[:] = [self[i]]
+            yield i, self[i], replace
+            replacement = filter(None, replacement)
+            self[i:i+1] = replacement
+            i += len(replacement)
+
     def __repr__(self):
         return list.__repr__(self)
 
@@ -621,33 +633,26 @@ class Compiler(object):
         if not isinstance(node, ComplexNode):
             return node
 
-        i = 0
         offset = 0
-        while i < len(node):
-            cur = node[i]
+        for i, cur, replace in node.transforming():
             if not cur: # remove no-op
-                del node[i]
-                continue
-
-            if isinstance(cur, MovePointer):
+                replace()
+            elif isinstance(cur, MovePointer):
                 offset += cur.offset
-                del node[i]
-                continue
+                replace()
             else:
+                result = []
                 if cur.canmovepointer(offset):
                     cur.movepointer(offset)
                 else:
                     # movepointer failed, flush current MovePointer node before it
-                    if offset != 0:
-                        node.insert(i, MovePointer(offset))
-                        i += 1
+                    if offset != 0: result.append(MovePointer(offset))
                     offset = 0
-                node[i] = self.optimize_minptrmoves(cur)
-
-            i += 1
-
+                result.append(self.optimize_minptrmoves(cur))
+                replace(*result)
         if offset != 0:
             node.append(MovePointer(offset))
+
         return node
 
     # change first AdjustMemory nodes to SetMemory in the very first of program.
@@ -656,90 +661,84 @@ class Compiler(object):
         if not isinstance(node, Program):
             return node
 
-        i = 0
         offsets = 0
         changed = set()
-        while i < len(node):
-            if isinstance(node[i], AdjustMemory) and \
-                    node[i].offset + offsets not in changed:
-                node[i] = SetMemory(node[i].offset, node[i].delta)
-            elif isinstance(node[i], (LoopWhile, If)) and \
-                    node[i].target + offsets not in changed:
-                node[i] = Nop() # effectively no-op
+        for i, cur, replace in node.transforming():
+            if isinstance(cur, AdjustMemory) and cur.offset + offsets not in changed:
+                replace(SetMemory(cur.offset, cur.delta))
+            elif isinstance(cur, (LoopWhile, If)) and cur.target + offsets not in changed:
+                replace() # while(0) { ... } etc.
 
-            ioffsets = node[i].offsets()
+            ioffsets = cur.offsets()
             if ioffsets is None: break
             offsets += ioffsets
 
-            changed.update(j + offsets for j in node[i].updates() if j is not None)
-            i += 1
+            changed.update(j + offsets for j in cur.updates() if j is not None)
 
         while node and isinstance(node[-1], MovePointer):
             del node[-1]
         return node
 
-    # tries to optimize tight loop: LoopWhile[0+=1/0-=1, ...] w/o any MovePointers.
-    # every value of memory ops should be simple expression such as 4 or -3.
-    def optimize_tightloop(self, node):
+    # tries to optimize simple loops:
+    # - LoopWhile[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
+    # - LoopWhile[...] with offsets=0, no I/O, sets cell 0 to 0 within.
+    # every arguments of memory operation in it should be simple.
+    #
+    # this pass is for optimizing very common cases, like multiplication loops.
+    # moreloop pass will turn other cases into for loops.
+    def optimize_simpleloop(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
         overflow = 256 # XXX hard-coded, must be the power of 2
 
         inodes = []
-        for inode in node:
-            if isinstance(inode, LoopWhile) and inode.offsets() == 0 and inode.pure():
+        for i, cur, replace in node.transforming():
+            if isinstance(cur, LoopWhile) and cur.offsets() == 0 and cur.pure():
                 # check constraints.
-                current = 0
-                currentset = False
+                cell = 0
+                cellset = False
                 hasset = False
                 multiplier = None
-                for change in inode:
+                for change in cur:
                     if isinstance(change, SetMemory):
                         if not change.value.simple(): break
-                        if change.offset == inode.target:
-                            current = change.value
-                            currentset = True
+                        if change.offset == cur.target:
+                            cell = change.value
+                            cellset = True
                         hasset = True # in this case we should use If[] instead.
                     elif isinstance(change, AdjustMemory):
                         if not change.delta.simple(): break
-                        if change.offset == inode.target:
-                            current += change.delta
+                        if change.offset == cur.target:
+                            cell += change.delta
                     elif isinstance(change, ComplexNode):
                         break
                 else:
-                    if currentset:
-                        if current == 0:
+                    if cellset:
+                        if cell == 0:
                             multiplier = 1
                     else:
-                        if current == 1:
-                            multiplier = overflow - Expr[inode.target]
-                        elif current == -1:
-                            multiplier = Expr[inode.target]
+                        if cell == 1:
+                            multiplier = overflow - Expr[cur.target]
+                        elif cell == -1:
+                            multiplier = Expr[cur.target]
 
                 if multiplier is not None:
-                    if hasset:
-                        changes = []
-                    else:
-                        changes = inodes
-
-                    for change in inode:
-                        if change.offset == inode.target: continue
+                    result = []
+                    for change in cur:
+                        if change.offset == cur.target: continue
                         if isinstance(change, AdjustMemory):
                             change.delta *= multiplier
-                        changes.append(change)
+                        result.append(change)
 
-                    if hasset:
-                        inodes.append(If(inode.target, changes))
-                    inodes.append(SetMemory(inode.target, 0))
+                    if hasset: result = [If(cur.target, result)]
+                    result.append(SetMemory(cur.target, 0))
+                    replace(*result)
                     continue
 
-            if isinstance(inode, ComplexNode):
-                inodes.append(self.optimize_tightloop(inode))
-            else:
-                inodes.append(inode)
+            if isinstance(cur, ComplexNode):
+                replace(self.optimize_simpleloop(cur))
 
-        node[:] = inodes
         return node
 
     # propagates cell references and constants as much as possible.
@@ -753,10 +752,7 @@ class Compiler(object):
         usedrefs = {}
         substs = {} # only for simple one, unless some vars are not current
 
-        i = 0
-        while i < len(node):
-            cur = node[i]
-
+        for i, cur, replace in node.transforming():
             impure = mergable = False
             offset = None
             refs = []
@@ -779,7 +775,8 @@ class Compiler(object):
                     substs[offset] += delta
                     if substs[offset].simple():
                         # replace with equivalent SetMemory node.
-                        cur = node[i] = SetMemory(offset, substs[offset])
+                        cur = SetMemory(offset, substs[offset])
+                        replace(cur)
                     else:
                         del substs[offset]
             elif isinstance(cur, Input):
@@ -791,7 +788,7 @@ class Compiler(object):
                 expr = cur.expr = cur.expr.withmemory(substs)
                 refs = expr.references()
             else: # MovePointer, LoopWhile etc.
-                node[i] = self.optimize_propagate(cur)
+                replace(self.optimize_propagate(cur))
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
@@ -821,7 +818,7 @@ class Compiler(object):
                             node[target].value += cur.delta
                         else:
                             node[target].delta += cur.delta
-                        del node[i]
+                        replace()
                         merged = True
                     else:
                         backrefs[offset] = i
@@ -830,7 +827,6 @@ class Compiler(object):
 
             if not merged:
                 target = i
-                i += 1
             for ioffset in refs:
                 usedrefs[ioffset] = target
 
@@ -838,8 +834,8 @@ class Compiler(object):
 
     # extensive loop optimization. it calculates repeat count if possible and
     # tries to convert them into For[].
-    def optimize_loop(self, node):
-        pass
+    def optimize_moreloop(self, node):
+        return node
 
     # converts common idioms to direct C library call.
     def optimize_stdlib(self, node):
@@ -875,11 +871,12 @@ def main(argv):
 
     compiler = Compiler()
     node = compiler.parse(file(argv[1], 'r'))
-    node = compiler.optimize_tightloop(node)
+    node = compiler.optimize_simpleloop(node)
     node = compiler.optimize_minptrmoves(node)
     node = compiler.optimize_onceuponatime(node)
     node = compiler.optimize_propagate(node)
-    node = compiler.optimize_tightloop(node)
+    node = compiler.optimize_simpleloop(node)
+    node = compiler.optimize_moreloop(node)
     node = compiler.optimize_propagate(node)
     node = compiler.optimize_stdlib(node)
     node.emit(Emitter())
