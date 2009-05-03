@@ -6,8 +6,11 @@ import sys
 from collections import namedtuple
 from cStringIO import StringIO
 
+_reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
+_reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
+_reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
 def _addslashes(s):
-    return ''.join('\\"' if i == '"' else repr(i)[1:-1] for i in s)
+    return ''.join(_reprmap[ord(i)] for i in s)
 
 
 class _ExprMeta(type):
