@@ -146,6 +146,7 @@ class Expr(object):
         return self
 
     def __add__(lhs, rhs):
+        rhs = Expr(rhs)
         if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
             return Expr(lhs.root.value + rhs.root.value)
         if lhs == 0: return rhs
@@ -162,6 +163,7 @@ class Expr(object):
     def __rsub__(rhs, lhs): return lhs + (-rhs)
 
     def __mul__(lhs, rhs):
+        rhs = Expr(rhs)
         if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
             return Expr(lhs.root.value * rhs.root.value)
         if lhs == 0 or rhs == 0: return Expr()
@@ -248,6 +250,9 @@ class IONode(Node):
     pass
 
 class ComplexNode(Node, list):
+    def __nonzero__(self):
+        return len(self) > 0
+
     def _indentall(self):
         return ''.join(map(insert_indent, map(str, self)))
 
@@ -514,23 +519,31 @@ class Compiler(object):
             if isinstance(inode, LoopWhile) and inode.offsets() == 0 and inode.pure():
                 # check constraints.
                 current = 0
+                currentset = False
                 hasset = False
                 multiplier = None
                 for change in inode:
                     if isinstance(change, SetMemory):
                         if not change.value.simple(): break
-                        if change.offset == 0: break # conditional, handled later
+                        if change.offset == 0:
+                            current = change.value
+                            currentset = True
                         hasset = True # in this case we should use If[] instead.
                     elif isinstance(change, AdjustMemory):
                         if not change.delta.simple(): break
-                        if change.offset == 0: current += change.delta
+                        if change.offset == 0:
+                            current += change.delta
                     elif isinstance(change, ComplexNode):
                         break
                 else:
-                    if current == 1:
-                        multiplier = overflow - Expr[0]
-                    elif current == -1:
-                        multiplier = Expr[0]
+                    if currentset:
+                        if current == 0:
+                            multiplier = 1
+                    else:
+                        if current == 1:
+                            multiplier = overflow - Expr[0]
+                        elif current == -1:
+                            multiplier = Expr[0]
 
                 if multiplier is not None:
                     if hasset:
@@ -543,10 +556,10 @@ class Compiler(object):
                         if isinstance(change, AdjustMemory):
                             change.delta *= multiplier
                         changes.append(change)
-                    changes.append(SetMemory(0, 0))
 
                     if hasset:
                         inodes.append(If(changes))
+                    inodes.append(SetMemory(0, 0))
                     continue
 
             if isinstance(inode, ComplexNode):
