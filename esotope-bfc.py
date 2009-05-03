@@ -226,6 +226,9 @@ class Node(object):
     def __str__(self): raise NotImplemented('should be overriden')
     def __repr__(self): raise NotImplemented('should be overriden')
 
+class IONode(Node):
+    pass
+
 class ComplexNode(Node, list):
     def _indentall(self):
         return ''.join(map(insert_indent, map(str, self)))
@@ -235,7 +238,7 @@ class ComplexNode(Node, list):
 
     def pure(self, start=None, end=None):
         for i in xrange(*slice(start, end).indices(len(self))):
-            if isinstance(self[i], (Input, Output)): return False
+            if isinstance(self[i], IONode): return False
         return True
 
     def offsets(self, start=None, end=None):
@@ -335,7 +338,7 @@ class MovePointer(Node):
     def __repr__(self):
         return '@%r' % self.offset
 
-class Input(Node):
+class Input(IONode):
     def __init__(self, offset):
         self.offset = offset
 
@@ -351,18 +354,18 @@ class Input(Node):
     def __repr__(self):
         return 'Input[%r]' % self.offset
 
-class Output(Node):
-    def __init__(self, offset):
-        self.offset = offset
+class Output(IONode):
+    def __init__(self, expr):
+        self.expr = expr
 
     def movepointer(self, offset):
-        self.offset += offset
+        self.expr = self.expr.movepointer(offset)
 
     def __str__(self):
-        return 'putchar(mptr[%s]);\n' % self.offset
+        return 'putchar(%s);\n' % self.expr
 
     def __repr__(self):
-        return 'Output[%r]' % self.offset
+        return 'Output[%r]' % self.expr
 
 class If(ComplexNode):
     def __str__(self):
@@ -410,7 +413,7 @@ class Compiler(object):
                     offset = 0
 
                     if ch == '.':
-                        nodestack[-1].append(Output(0))
+                        nodestack[-1].append(Output(Expr[0]))
                     elif ch == ',':
                         nodestack[-1].append(Input(0))
                     elif ch == '[':
@@ -493,11 +496,13 @@ class Compiler(object):
             if isinstance(inode, LoopWhile) and inode.offsets() == 0 and inode.pure():
                 # check constraints.
                 current = 0
+                hasset = False
                 multiplier = None
                 for change in inode:
                     if isinstance(change, SetMemory):
                         if not change.value.simple(): break
                         if change.offset == 0: break # conditional, handled later
+                        hasset = True # in this case we should use If[] instead.
                     elif isinstance(change, AdjustMemory):
                         if not change.delta.simple(): break
                         if change.offset == 0: current += change.delta
@@ -510,48 +515,20 @@ class Compiler(object):
                         multiplier = Expr[0]
 
                 if multiplier is not None:
+                    if hasset:
+                        changes = []
+                    else:
+                        changes = inodes
+
                     for change in inode:
                         if change.offset == 0: continue
                         if isinstance(change, AdjustMemory):
                             change.delta *= multiplier
-                        inodes.append(change)
-                    inodes.append(SetMemory(0, 0))
-                    continue
+                        changes.append(change)
+                    changes.append(SetMemory(0, 0))
 
-            if isinstance(inode, ComplexNode):
-                inodes.append(self.optimize_tightloop(inode))
-            else:
-                inodes.append(inode)
-
-        node[:] = inodes
-        return node
-
-    # recognizes conditionals like LoopWhile[..., 0=0].
-    def optimize_conditional(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
-        for i in xrange(len(node)):
-            if isinstance(node[i], LoopWhile) and node[i].offset() == 0:
-                current = None
-                for change in node[i]:
-                    if isinstance(change, SetMemory):
-                        if change.offset == 0: current = change.delta
-                    elif isinstance(change, Add):
-                        if change.offset == 0: current = change.delta
-                else:
-                    if current == 1:
-                        multiplier = overflow - Expr[0]
-                    elif current == -1:
-                        multiplier = Expr[0]
-
-                if multiplier is not None:
-                    for change in inode:
-                        if change.offset == 0: continue
-                        if isinstance(change, AdjustMemory):
-                            change.delta *= multiplier
-                        inodes.append(change)
-                    inodes.append(SetMemory(0, 0))
+                    if hasset:
+                        inodes.append(If(changes))
                     continue
 
             if isinstance(inode, ComplexNode):
@@ -608,13 +585,14 @@ class Compiler(object):
                 try: del substs[offset]
                 except: pass
             elif isinstance(cur, Output):
-                refs = [cur.offset]
+                expr = cur.expr = cur.expr.withmemory(substs)
+                refs = expr.references()
             else: # MovePointer, LoopWhile etc.
                 node[i] = self.optimize_propagate(cur)
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
-                if isinstance(cur, LoopWhile):
+                if isinstance(cur, (LoopWhile, If)):
                     substs[0] = Expr()
 
             merged = False
@@ -666,6 +644,7 @@ def main(argv):
     node = compiler.optimize_minptrmoves(node)
     node = compiler.optimize_onceuponatime(node)
     node = compiler.optimize_propagate(node)
+    node = compiler.optimize_tightloop(node)
     print node
     return 0
 
