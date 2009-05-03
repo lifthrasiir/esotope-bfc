@@ -6,6 +6,9 @@ import sys
 from collections import namedtuple
 from cStringIO import StringIO
 
+def _addslashes(s):
+    return ''.join('\\"' if i == '"' else repr(i)[1:-1] for i in s)
+
 
 class _ExprMeta(type):
     def __getitem__(self, offset):
@@ -196,6 +199,10 @@ class Expr(object):
     def __ge__(self, rhs):
         try: return self.root.value >= Expr(rhs).root.value
         except: return False
+
+    def __int__(self):
+        assert self.simple()
+        return self.root.value
 
     def simple(self):
         return isinstance(self.root, Expr.Number)
@@ -409,6 +416,29 @@ class Output(IONode):
     def __repr__(self):
         return 'Output[%r]' % self.expr
 
+class OutputConst(IONode):
+    def __init__(self, s):
+        if isinstance(s, str):
+            self.str = s
+        else:
+            self.str = ''.join(chr(i & 0xff) for i in s)
+
+    def __nonzero__(self):
+        return len(self.str) > 0
+
+    def canmovepointer(self, offset):
+        return True
+
+    def movepointer(self, offset):
+        pass # does nothing
+
+    def emit(self, emitter):
+        for line in self.str.splitlines(True):
+            emitter.write('printf("%s");' % _addslashes(line))
+
+    def __repr__(self):
+        return 'OutputConst[%r]' % self.str
+
 class If(ComplexNode):
     def __init__(self, target, children=[]):
         ComplexNode.__init__(self, children)
@@ -583,7 +613,7 @@ class Compiler(object):
         overflow = 256 # XXX hard-coded, must be the power of 2
 
         inodes = []
-        for inode in node[:]:
+        for inode in node:
             if isinstance(inode, LoopWhile) and inode.offsets() == 0 and inode.pure():
                 # check constraints.
                 current = 0
@@ -732,6 +762,36 @@ class Compiler(object):
 
         return node
 
+    def optimize_loopcount(self, node):
+        pass
+
+    # converts common idioms to direct C library call.
+    def optimize_stdlib(self, node):
+        if not isinstance(node, ComplexNode):
+            return node
+
+        inodes = []
+        laststr = []
+        for inode in node:
+            if isinstance(inode, Output) and inode.expr.simple():
+                laststr.append(chr(int(inode.expr) & 0xff))
+            elif isinstance(inode, OutputConst):
+                laststr.append(inode.str)
+            elif isinstance(inode, (Input, SetMemory, AdjustMemory, MovePointer)):
+                inodes.append(inode) # doesn't affect string output
+            else:
+                if laststr:
+                    inodes.append(OutputConst(''.join(laststr)))
+                    laststr = []
+                if isinstance(inode, ComplexNode):
+                    inodes.append(self.optimize_stdlib(inode))
+                else:
+                    inodes.append(inode)
+        if laststr:
+            inodes.append(OutputConst(''.join(laststr)))
+        node[:] = inodes
+        return node
+
 def main(argv):
     if len(argv) < 2:
         print >>sys.stderr, 'Usage: %s filename' % argv[0]
@@ -745,6 +805,7 @@ def main(argv):
     node = compiler.optimize_propagate(node)
     node = compiler.optimize_tightloop(node)
     node = compiler.optimize_propagate(node)
+    node = compiler.optimize_stdlib(node)
     node.emit(Emitter())
     return 0
 
