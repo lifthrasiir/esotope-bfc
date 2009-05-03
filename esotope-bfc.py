@@ -27,16 +27,32 @@ class Expr(object):
     class Number(namedtuple('Number', 'value'), _exprbase):
         def __str__(self): return str(self.value)
         def __repr__(self): return repr(self.value)
-        def apply(self, func, merge=None): return func(self)
+
+        def simplify(self):
+            return self
+
+        def apply(self, func, merge=None):
+            return func(self)
 
     class MemoryRef(namedtuple('MemoryRef', 'offset'), _exprbase):
         def __str__(self): return 'mptr[%s]' % self.offset
         def __repr__(self): return 'mptr[%r]' % self.offset
-        def apply(self, func, merge=None): return func(self)
+
+        def simplify(self):
+            return self
+
+        def apply(self, func, merge=None):
+            return func(self)
 
     class Negate(namedtuple('Negate', 'expr'), _exprbase):
         def __str__(self): return '-%s' % (self.expr,)
         def __repr__(self): return '-%r' % (self.expr,)
+
+        def simplify(self):
+            if isinstance(self.expr, Expr.Number): return Expr.Number(-self.expr.value)
+            if isinstance(self.expr, Expr.Negate): return self.expr
+            return Expr.Negate(self.expr.simplify())
+
         def apply(self, func, merge=None):
             return (merge or Expr.Negate)(self.expr.apply(func, merge))
 
@@ -54,12 +70,54 @@ class Expr(object):
 
         def __str__(self): return '(%s)' % ' '.join(self._prettify(str))
         def __repr__(self): return '(%s)' % ''.join(self._prettify(repr))
+
+        def simplify(self):
+            result = []
+            numbersum = 0
+            for child in self:
+                child = child.simplify()
+                if isinstance(child, Expr.Number):
+                    numbersum += child.value
+                else:
+                    result.append(child)
+            if numbersum != 0:
+                result.append(Expr.Number(numbersum))
+
+            if len(result) == 0:
+                return Expr.Number(0)
+            elif len(result) == 1:
+                return result[0]
+            else:
+                return Expr.Sum(*result)
+
         def apply(self, func, merge=None):
             return (merge or Expr.Sum)(*[i.apply(func, merge) for i in self])
 
     class Product(_exprbase):
         def __str__(self): return '(%s)' % ' * '.join(map(str, self))
         def __repr__(self): return '(%s)' % '*'.join(map(repr, self))
+
+        def simplify(self):
+            result = []
+            numberprod = 1
+            for child in self:
+                child = child.simplify()
+                if isinstance(child, Expr.Number):
+                    numberprod *= child.value
+                else:
+                    result.append(child)
+            if numberprod != 0:
+                result.append(Expr.Number(numberprod))
+            else:
+                del result[:]
+
+            if len(result) == 0:
+                return Expr.Number(0)
+            elif len(result) == 1:
+                return result[0]
+            else:
+                return Expr.Product(*result)
+
         def apply(self, func, merge=None):
             return (merge or Expr.Product)(*[i.apply(func, merge) for i in self])
 
@@ -122,6 +180,9 @@ class Expr(object):
     def simple(self):
         return isinstance(self.root, Expr.Number)
 
+    def simplify(self):
+        return Expr(self.root.simplify())
+
     def references(self):
         def func(node):
             if not isinstance(node, Expr.MemoryRef): return set()
@@ -134,11 +195,12 @@ class Expr(object):
             return Expr.MemoryRef(node.offset + delta)
         return Expr(self.root.apply(func))
 
-    def setmemory(self, map):
+    def withmemory(self, map):
         def func(node):
             if not isinstance(node, Expr.MemoryRef): return node
-            return map.get(node.offset, node)
-        return Expr(self.root.apply(func))
+            try: return map[node.offset].root # assume Expr object
+            except: return node
+        return Expr(self.root.apply(func).simplify())
 
     def __str__(self):
         return str(self.root)
@@ -396,6 +458,28 @@ class Compiler(object):
             node.append(MovePointer(offset))
         return node
 
+    # change first AdjustMemory nodes to SetMemory in the very first of program.
+    # also removes the last (redundant) MovePointer if any.
+    def optimize_onceuponatime(self, node):
+        if not isinstance(node, Program):
+            return node
+
+        i = 0
+        changed = set()
+        while i < len(node):
+            if isinstance(node[i], (SetMemory, Input)):
+                changed.add(node[i].offset)
+            elif isinstance(node[i], AdjustMemory):
+                if node[i].offset not in changed:
+                    node[i] = SetMemory(node[i].offset, node[i].delta)
+                changed.add(node[i].offset)
+            elif not isinstance(node[i], Output):
+                break
+            i += 1
+        while node and isinstance(node[-1], MovePointer):
+            del node[-1]
+        return node
+
     # tries to optimize tight loop: LoopWhile[0+=1/0-=1, ...] w/o any MovePointers.
     # every value of memory ops should be simple expression such as 4 or -3.
     def optimize_tightloop(self, node):
@@ -478,7 +562,7 @@ class Compiler(object):
         node[:] = inodes
         return node
 
-    # propagates cell references as much as possible.
+    # propagates cell references and constants as much as possible.
     # requires minptrloops pass for optimal processing. otherwise MovePointer
     # will act as memory blocker.
     def optimize_propagate(self, node):
@@ -487,7 +571,7 @@ class Compiler(object):
 
         backrefs = {}
         usedrefs = {}
-        substs = {} # only for simple one
+        substs = {} # only for simple one, unless some vars are not current
 
         i = 0
         while i < len(node):
@@ -499,14 +583,30 @@ class Compiler(object):
             if isinstance(cur, SetMemory):
                 impure = mergable = True
                 offset = cur.offset
-                refs = [ref for ref in cur.value.references()]
+                value = cur.value = cur.value.withmemory(substs)
+                refs = value.references()
+                if value.simple():
+                    substs[offset] = value
+                else:
+                    try: del substs[offset]
+                    except: pass
             elif isinstance(cur, AdjustMemory):
                 impure = mergable = True
                 offset = cur.offset
-                refs = [ref for ref in cur.delta.references()]
+                delta = cur.delta = cur.delta.withmemory(substs)
+                refs = delta.references()
+                if offset in substs:
+                    substs[offset] += delta
+                    if substs[offset].simple():
+                        # replace with equivalent SetMemory node.
+                        cur = node[i] = SetMemory(offset, substs[offset])
+                    else:
+                        del substs[offset]
             elif isinstance(cur, Input):
                 impure = True
                 offset = cur.offset
+                try: del substs[offset]
+                except: pass
             elif isinstance(cur, Output):
                 refs = [cur.offset]
             else: # MovePointer, LoopWhile etc.
@@ -514,6 +614,8 @@ class Compiler(object):
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
+                if isinstance(cur, LoopWhile):
+                    substs[0] = Expr()
 
             merged = False
             if impure:
@@ -562,6 +664,7 @@ def main(argv):
     node = compiler.parse(file(argv[1], 'r'))
     node = compiler.optimize_tightloop(node)
     node = compiler.optimize_minptrmoves(node)
+    node = compiler.optimize_onceuponatime(node)
     node = compiler.optimize_propagate(node)
     print node
     return 0
