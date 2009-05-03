@@ -46,6 +46,8 @@ class Expr(object):
             for child in self[1:]:
                 if isinstance(child, Expr.Negate):
                     items.extend(['-', func(child.expr)])
+                elif isinstance(child, Expr.Number) and child.value < 0:
+                    items.extend(['-', func(-child.value)])
                 else:
                     items.extend(['+', func(child)])
             return items
@@ -153,8 +155,11 @@ class Node(object):
     def __nonzero__(self):
         return True # ... or return False if this node is no-op.
 
-    def combine(self, next):
-        return None # ... or return combined Node object.
+    def offsets(self):
+        return 0
+
+    def changes(self):
+        return {}
 
     def __str__(self): raise NotImplemented('should be overriden')
     def __repr__(self): raise NotImplemented('should be overriden')
@@ -171,12 +176,21 @@ class ComplexNode(Node, list):
             if isinstance(self[i], (Input, Output)): return False
         return True
 
-    def offset(self, start=None, end=None):
-        offset = 0
+    def offsets(self, start=None, end=None):
+        offsets = 0
         for i in xrange(*slice(start, end).indices(len(self))):
-            if isinstance(self[i], MovePointer):
-                offset += self[i].offset
-        return offset
+            offsets += self[i].offsets()
+        return offsets
+
+    # XXX
+    def changes(self, start=None, end=None):
+        offsets = 0
+        changes = {}
+        for i in xrange(*slice(start, end).indices(len(self))):
+            ichanges = self[i].changes()
+            changes.update((k + offsets, v.movepointer(offsets)) for k, v in ichanges.items())
+            offsets += self[i].offsets()
+        return changes
 
 class Program(ComplexNode):
     def __str__(self):
@@ -200,6 +214,9 @@ class SetMemory(Node):
         self.offset += offset
         self.value = self.value.movepointer(offset)
 
+    def changes(self):
+        return {self.offset: self.value}
+
     def __str__(self):
         return 'mptr[%d] = %s;\n' % (self.offset, self.value)
 
@@ -217,6 +234,9 @@ class AdjustMemory(Node):
     def movepointer(self, offset):
         self.offset += offset
         self.delta = self.delta.movepointer(offset)
+
+    def changes(self):
+        return {self.offset: Expr[self.offset] + self.delta}
 
     def __str__(self):
         if self.delta < 0:
@@ -239,6 +259,9 @@ class MovePointer(Node):
     def __nonzero__(self):
         return self.offset != 0
 
+    def offsets(self):
+        return self.offset
+
     def __str__(self):
         if self.offset < 0:
             return 'mptr -= %s;\n' % -self.offset
@@ -256,6 +279,9 @@ class Input(Node):
 
     def movepointer(self, offset):
         self.offset += offset
+
+    def changes(self):
+        return {self.offset: None}
 
     def __str__(self):
         return 'mptr[%s] = getchar();\n' % self.offset
@@ -275,6 +301,15 @@ class Output(Node):
 
     def __repr__(self):
         return 'Output[%r]' % self.offset
+
+class If(ComplexNode):
+    def __str__(self):
+        return ('if (*mptr) {\n'
+                '%s'
+                '}\n') % self._indentall()
+
+    def __repr__(self):
+        return self._repr('If')
 
 class LoopWhile(ComplexNode):
     def __str__(self):
@@ -371,14 +406,14 @@ class Compiler(object):
 
         inodes = []
         for inode in node[:]:
-            if isinstance(inode, LoopWhile) and inode.offset() == 0 and inode.pure():
+            if isinstance(inode, LoopWhile) and inode.offsets() == 0 and inode.pure():
                 # check constraints.
                 current = 0
                 multiplier = None
                 for change in inode:
                     if isinstance(change, SetMemory):
                         if not change.value.simple(): break
-                        if change.offset == 0: break # XXX how to treat conditional?
+                        if change.offset == 0: break # conditional, handled later
                     elif isinstance(change, AdjustMemory):
                         if not change.delta.simple(): break
                         if change.offset == 0: current += change.delta
@@ -407,17 +442,53 @@ class Compiler(object):
         node[:] = inodes
         return node
 
-    # dead code elimination and constant propagation.
-    # TODO: should use better algorithm.
+    # recognizes conditionals like LoopWhile[..., 0=0].
+    def optimize_conditional(self, node):
+        if not isinstance(node, ComplexNode):
+            return node
+
+        for i in xrange(len(node)):
+            if isinstance(node[i], LoopWhile) and node[i].offset() == 0:
+                current = None
+                for change in node[i]:
+                    if isinstance(change, SetMemory):
+                        if change.offset == 0: current = change.delta
+                    elif isinstance(change, Add):
+                        if change.offset == 0: current = change.delta
+                else:
+                    if current == 1:
+                        multiplier = overflow - Expr[0]
+                    elif current == -1:
+                        multiplier = Expr[0]
+
+                if multiplier is not None:
+                    for change in inode:
+                        if change.offset == 0: continue
+                        if isinstance(change, AdjustMemory):
+                            change.delta *= multiplier
+                        inodes.append(change)
+                    inodes.append(SetMemory(0, 0))
+                    continue
+
+            if isinstance(inode, ComplexNode):
+                inodes.append(self.optimize_tightloop(inode))
+            else:
+                inodes.append(inode)
+
+        node[:] = inodes
+        return node
+
+    # propagates cell references as much as possible.
     def optimize_propagate(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
         backrefs = {}
         usedrefs = {}
+        substs = {} # only for simple one
 
         i = 0
-        poffset = 0
+        pointer = 0
         while i < len(node):
             cur = node[i]
 
@@ -426,26 +497,26 @@ class Compiler(object):
             refs = []
             if isinstance(cur, SetMemory):
                 impure = mergable = True
-                offset = poffset + cur.offset
-                refs = [poffset + ref for ref in cur.value.references()]
+                offset = pointer + cur.offset
+                refs = [pointer + ref for ref in cur.value.references()]
             elif isinstance(cur, AdjustMemory):
                 impure = mergable = True
-                offset = cur.offset
-                refs = [poffset + ref for ref in cur.delta.references()]
+                offset = pointer + cur.offset
+                refs = [pointer + ref for ref in cur.delta.references()]
             elif isinstance(cur, MovePointer):
-                poffset += cur.offset
+                pointer += cur.offset
             elif isinstance(cur, Input):
                 impure = True
-                offset = poffset + cur.offset
+                offset = pointer + cur.offset
             elif isinstance(cur, Output):
-                refs = [poffset + cur.offset]
+                refs = [pointer + cur.offset]
             else:
                 node[i] = self.optimize_propagate(cur)
 
                 # invalidates all prior references.
                 backrefs.clear()
                 usedrefs.clear()
-                poffset = 0
+                substs.clear()
 
             merged = False
             if impure:
@@ -465,11 +536,11 @@ class Compiler(object):
                     if target > usedrefs.get(offset, -1) and \
                             all(target > backrefs.get(ioffset, -1) for ioffset in refs):
                         if isinstance(cur, SetMemory):
-                            node[target] = cur
+                            node[target] = SetMemory(offset - pointer, cur.value.movepointer(-pointer))
                         elif isinstance(node[target], SetMemory):
-                            node[target].value += cur.delta
+                            node[target].value += cur.delta.movepointer(-pointer)
                         else:
-                            node[target].delta += cur.delta
+                            node[target].delta += cur.delta.movepointer(-pointer)
                         del node[i]
                         merged = True
                     else:
@@ -492,7 +563,6 @@ def main(argv):
 
     compiler = Compiler()
     node = compiler.parse(file(argv[1], 'r'))
-    node = compiler.optimize_minptrmoves(node)
     node = compiler.optimize_tightloop(node)
     node = compiler.optimize_minptrmoves(node)
     node = compiler.optimize_propagate(node)
