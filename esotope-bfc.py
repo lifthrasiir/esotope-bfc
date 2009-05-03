@@ -49,8 +49,12 @@ class Expr(object):
         def __repr__(self): return '-%r' % (self.expr,)
 
         def simplify(self):
-            if isinstance(self.expr, Expr.Number): return Expr.Number(-self.expr.value)
-            if isinstance(self.expr, Expr.Negate): return self.expr
+            if isinstance(self.expr, Expr.Number):
+                return Expr.Number(-self.expr.value)
+            if isinstance(self.expr, Expr.Negate):
+                return self.expr
+            if isinstance(self.expr, Expr.Sum):
+                return Expr.Sum(*[Expr.Negate(child).simplify() for child in self.expr])
             return Expr.Negate(self.expr.simplify())
 
         def apply(self, func, merge=None):
@@ -78,6 +82,8 @@ class Expr(object):
                 child = child.simplify()
                 if isinstance(child, Expr.Number):
                     numbersum += child.value
+                elif isinstance(child, Expr.Sum):
+                    result.extend(child)
                 else:
                     result.append(child)
             if numbersum != 0:
@@ -104,6 +110,8 @@ class Expr(object):
                 child = child.simplify()
                 if isinstance(child, Expr.Number):
                     numberprod *= child.value
+                elif isinstance(child, Expr.Product):
+                    result.extend(child)
                 else:
                     result.append(child)
             if numberprod != 0:
@@ -138,25 +146,35 @@ class Expr(object):
         return self
 
     def __add__(lhs, rhs):
-        if lhs == 0: return rhs
-        if rhs == 0: return lhs
         if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
             return Expr(lhs.root.value + rhs.root.value)
-        return Expr(Expr.Sum(lhs.root, Expr(rhs).root))
+        if lhs == 0: return rhs
+        if rhs == 0: return lhs
+
+        lhsroot = lhs.root
+        rhsroot = rhs.root
+        if not isinstance(lhsroot, Expr.Sum): lhsroot = (lhsroot,)
+        if not isinstance(rhsroot, Expr.Sum): rhsroot = (rhsroot,)
+        return Expr(Expr.Sum(*(lhsroot + rhsroot)))
 
     def __radd__(rhs, lhs): return Expr(lhs) + rhs
     def __sub__(lhs, rhs): return lhs + (-rhs)
     def __rsub__(rhs, lhs): return lhs + (-rhs)
 
     def __mul__(lhs, rhs):
+        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
+            return Expr(lhs.root.value * rhs.root.value)
         if lhs == 0 or rhs == 0: return Expr()
         if lhs == 1: return rhs
         if rhs == 1: return lhs
         if lhs == -1: return -rhs
         if rhs == -1: return -lhs
-        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
-            return Expr(lhs.root.value * rhs.root.value)
-        return Expr(Expr.Product(lhs.root, Expr(rhs).root))
+
+        lhsroot = lhs.root
+        rhsroot = rhs.root
+        if not isinstance(lhsroot, Expr.Product): lhsroot = (lhsroot,)
+        if not isinstance(rhsroot, Expr.Product): rhsroot = (rhsroot,)
+        return Expr(Expr.Product(*(lhsroot + rhsroot)))
 
     def __rmul__(rhs, lhs): return Expr(lhs) * rhs
 
