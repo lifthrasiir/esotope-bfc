@@ -240,20 +240,29 @@ class Expr(object):
 
 
 class Node(object):
-    def __nonzero__(self):
-        return True # ... or return False if this node is no-op.
+    # returns False if it is a no-op. minptrmoves pass will remove such no-ops.
+    def __nonzero__(self): return True
 
-    def movepointer(self):
-        return False # ... or adjust internal memory references and return True
+    # returns False if it does an input or output, thus cannot be reordered.
+    def pure(self): return True
 
-    def offsets(self):
-        return 0
+    # moves all memory references in it by offset.
+    # if it is not possible (like LoopWhile) canmovepointer should return False.
+    def canmovepointer(self, offset): return False
+    def movepointer(self, offset): raise RuntimeError('not implemented')
 
-    def changes(self):
-        return {}
-
-class IONode(Node):
-    pass
+    # specifies what this node does. optimizer assumes it does:
+    # - changes the pointer by node.offsets().
+    # - references (at least) all memory cells in node.references().
+    # - updates (at least) all memory cells in node.updates().
+    #
+    # node.offsets() can return Expr object, or None if uncertain.
+    # node.references() and node.updates() is a set containing memory offset
+    # relative to the final (after moved by node.offsets()) pointer.
+    # if the set contains None, it can reference or update other unspecificed cells.
+    def offsets(self): return 0
+    def references(self): return set()
+    def updates(self): return set()
 
 class ComplexNode(Node, list):
     def __nonzero__(self):
@@ -269,7 +278,7 @@ class ComplexNode(Node, list):
             for child in self: child.movepointer(offset)
 
     def pure(self):
-        return all(not isinstance(child, IONode) for child in self)
+        return all(child.pure() for child in self)
 
     def offsets(self):
         offsets = 0
@@ -279,15 +288,31 @@ class ComplexNode(Node, list):
             offsets += ioffsets
         return offsets
 
-    # XXX
-    def changes(self, start=None, end=None):
+    def references(self):
         offsets = 0
-        changes = {}
-        for i in xrange(*slice(start, end).indices(len(self))):
-            ichanges = self[i].changes()
-            changes.update((k + offsets, v.movepointer(offsets)) for k, v in ichanges.items())
-            offsets += self[i].offsets()
-        return changes
+        refs = []
+        for child in self:
+            ioffsets = child.offsets()
+            if ioffsets is None:
+                # invalidates prior updates, but not later nor current.
+                offsets = 0
+                refs = [None]
+            refs.extend(i if i is None else i + offsets for i in child.references())
+
+        # should return memory references relative to final pointer.
+        return set(i if i is None else i - offsets for i in refs)
+
+    def updates(self):
+        offsets = 0
+        updates = []
+        for child in self:
+            ioffsets = child.offsets()
+            if ioffsets is None:
+                offsets = 0
+                updates = [None]
+            updates.extend(i if i is None else i + offsets for i in child.updates())
+
+        return set(i if i is None else i - offsets for i in updates)
 
     def __repr__(self):
         return list.__repr__(self)
@@ -308,6 +333,16 @@ class Program(ComplexNode):
     def __repr__(self):
         return 'Program[%s]' % ComplexNode.__repr__(self)[1:-1]
 
+class Nop(Node):
+    def __nonzero__(self):
+        return False
+
+    def emit(self, emitter):
+        pass
+
+    def __repr__(self):
+        return 'Nop[]'
+
 class SetMemory(Node):
     def __init__(self, offset, value):
         self.offset = offset
@@ -320,8 +355,11 @@ class SetMemory(Node):
         self.offset += offset
         self.value = self.value.movepointer(offset)
 
-    def changes(self):
-        return {self.offset: self.value}
+    def references(self):
+        return self.value.references()
+
+    def updates(self):
+        return set([self.offset])
 
     def emit(self, emitter):
         emitter.write('mptr[%d] = %s;' % (self.offset, self.value))
@@ -344,8 +382,11 @@ class AdjustMemory(Node):
         self.offset += offset
         self.delta = self.delta.movepointer(offset)
 
-    def changes(self):
-        return {self.offset: Expr[self.offset] + self.delta}
+    def references(self):
+        return set([self.offset]) | self.delta.references()
+
+    def updates(self):
+        return set([self.offset])
 
     def emit(self, emitter):
         if self.delta < 0:
@@ -384,9 +425,12 @@ class MovePointer(Node):
     def __repr__(self):
         return '@%r' % self.offset
 
-class Input(IONode):
+class Input(Node):
     def __init__(self, offset):
         self.offset = offset
+
+    def pure(self):
+        return False
 
     def canmovepointer(self, offset):
         return True
@@ -394,8 +438,8 @@ class Input(IONode):
     def movepointer(self, offset):
         self.offset += offset
 
-    def changes(self):
-        return {self.offset: None}
+    def updates(self):
+        return set([self.offset])
 
     def emit(self, emitter):
         emitter.write('mptr[%s] = getchar();' % self.offset)
@@ -403,12 +447,18 @@ class Input(IONode):
     def __repr__(self):
         return 'Input[%r]' % self.offset
 
-class Output(IONode):
+class Output(Node):
     def __init__(self, expr):
         self.expr = expr
 
+    def pure(self):
+        return False
+
     def canmovepointer(self, offset):
         return True
+
+    def references(self):
+        return self.expr.references()
 
     def movepointer(self, offset):
         self.expr = self.expr.movepointer(offset)
@@ -419,7 +469,7 @@ class Output(IONode):
     def __repr__(self):
         return 'Output[%r]' % self.expr
 
-class OutputConst(IONode):
+class OutputConst(Node):
     def __init__(self, s):
         if isinstance(s, str):
             self.str = s
@@ -428,6 +478,9 @@ class OutputConst(IONode):
 
     def __nonzero__(self):
         return len(self.str) > 0
+
+    def pure(self):
+        return False
 
     def canmovepointer(self, offset):
         return True
@@ -457,6 +510,12 @@ class If(ComplexNode):
         else:
             return None
 
+    def references(self):
+        return set([self.target]) | ComplexNode.references(self)
+
+    def updates(self):
+        return set([self.target]) | ComplexNode.updates(self)
+
     def emit(self, emitter):
         emitter.write('if (mptr[%s]) {' % self.target)
         emitter.indent()
@@ -482,6 +541,12 @@ class LoopWhile(ComplexNode):
             return 0
         else:
             return None
+
+    def references(self):
+        return set([self.target]) | ComplexNode.references(self)
+
+    def updates(self):
+        return set([self.target]) | ComplexNode.updates(self)
 
     def emit(self, emitter):
         emitter.write('while (mptr[%s]) {' % self.target)
@@ -592,17 +657,23 @@ class Compiler(object):
             return node
 
         i = 0
+        offsets = 0
         changed = set()
         while i < len(node):
-            if isinstance(node[i], (SetMemory, Input)):
-                changed.add(node[i].offset)
-            elif isinstance(node[i], AdjustMemory):
-                if node[i].offset not in changed:
-                    node[i] = SetMemory(node[i].offset, node[i].delta)
-                changed.add(node[i].offset)
-            elif not isinstance(node[i], Output):
-                break
+            if isinstance(node[i], AdjustMemory) and \
+                    node[i].offset + offsets not in changed:
+                node[i] = SetMemory(node[i].offset, node[i].delta)
+            elif isinstance(node[i], (LoopWhile, If)) and \
+                    node[i].target + offsets not in changed:
+                node[i] = Nop() # effectively no-op
+
+            ioffsets = node[i].offsets()
+            if ioffsets is None: break
+            offsets += ioffsets
+
+            changed.update(j + offsets for j in node[i].updates() if j is not None)
             i += 1
+
         while node and isinstance(node[-1], MovePointer):
             del node[-1]
         return node
@@ -765,7 +836,9 @@ class Compiler(object):
 
         return node
 
-    def optimize_loopcount(self, node):
+    # extensive loop optimization. it calculates repeat count if possible and
+    # tries to convert them into For[].
+    def optimize_loop(self, node):
         pass
 
     # converts common idioms to direct C library call.
