@@ -479,6 +479,8 @@ class Compiler(object):
         return node
 
     # propagates cell references as much as possible.
+    # requires minptrloops pass for optimal processing. otherwise MovePointer
+    # will act as memory blocker.
     def optimize_propagate(self, node):
         if not isinstance(node, ComplexNode):
             return node
@@ -488,7 +490,6 @@ class Compiler(object):
         substs = {} # only for simple one
 
         i = 0
-        pointer = 0
         while i < len(node):
             cur = node[i]
 
@@ -497,23 +498,19 @@ class Compiler(object):
             refs = []
             if isinstance(cur, SetMemory):
                 impure = mergable = True
-                offset = pointer + cur.offset
-                refs = [pointer + ref for ref in cur.value.references()]
+                offset = cur.offset
+                refs = [ref for ref in cur.value.references()]
             elif isinstance(cur, AdjustMemory):
                 impure = mergable = True
-                offset = pointer + cur.offset
-                refs = [pointer + ref for ref in cur.delta.references()]
-            elif isinstance(cur, MovePointer):
-                pointer += cur.offset
+                offset = cur.offset
+                refs = [ref for ref in cur.delta.references()]
             elif isinstance(cur, Input):
                 impure = True
-                offset = pointer + cur.offset
+                offset = cur.offset
             elif isinstance(cur, Output):
-                refs = [pointer + cur.offset]
-            else:
+                refs = [cur.offset]
+            else: # MovePointer, LoopWhile etc.
                 node[i] = self.optimize_propagate(cur)
-
-                # invalidates all prior references.
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
@@ -536,11 +533,11 @@ class Compiler(object):
                     if target > usedrefs.get(offset, -1) and \
                             all(target > backrefs.get(ioffset, -1) for ioffset in refs):
                         if isinstance(cur, SetMemory):
-                            node[target] = SetMemory(offset - pointer, cur.value.movepointer(-pointer))
+                            node[target] = SetMemory(offset, cur.value)
                         elif isinstance(node[target], SetMemory):
-                            node[target].value += cur.delta.movepointer(-pointer)
+                            node[target].value += cur.delta
                         else:
-                            node[target].delta += cur.delta.movepointer(-pointer)
+                            node[target].delta += cur.delta
                         del node[i]
                         merged = True
                     else:
