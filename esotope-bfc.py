@@ -77,34 +77,33 @@ class Expr(object):
     def __pos__(self):
         return self
 
-    def __add__(self, rhs):
-        if rhs == 0: return self
-        return Expr(Expr.Sum(self.root, Expr(rhs).root))
+    def __add__(lhs, rhs):
+        if lhs == 0: return rhs
+        if rhs == 0: return lhs
+        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
+            return Expr(lhs.root.value + rhs.root.value)
+        return Expr(Expr.Sum(lhs.root, Expr(rhs).root))
 
-    def __radd__(self, lhs):
-        if lhs == 0: return self
-        return Expr(Expr.Sum(Expr(lhs).root, self.root))
+    def __radd__(rhs, lhs): return Expr(lhs) + rhs
+    def __sub__(lhs, rhs): return lhs + (-rhs)
+    def __rsub__(rhs, lhs): return lhs + (-rhs)
 
-    def __sub__(self, rhs):
-        return self + (-rhs)
+    def __mul__(lhs, rhs):
+        if lhs == 0 or rhs == 0: return Expr()
+        if lhs == 1: return rhs
+        if rhs == 1: return lhs
+        if lhs == -1: return -rhs
+        if rhs == -1: return -lhs
+        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
+            return Expr(lhs.root.value * rhs.root.value)
+        return Expr(Expr.Product(lhs.root, Expr(rhs).root))
 
-    def __rsub__(self, lhs):
-        return lhs + (-self)
+    def __rmul__(rhs, lhs): return Expr(lhs) * rhs
 
-    def __mul__(self, rhs):
-        if rhs == 0: return Expr()
-        if rhs == 1: return self
-        if rhs == -1: return -self
-        return Expr(Expr.Product(self.root, Expr(rhs).root))
-
-    def __rmul__(self, lhs):
-        if lhs == 0: return Expr()
-        if lhs == 1: return self
-        if lhs == -1: return -self
-        return Expr(Expr.Product(Expr(lhs).root, self.root))
-
-    def __eq__(self, rhs): return self.root == Expr(rhs).root
-    def __ne__(self, rhs): return self.root != Expr(rhs).root
+    def __eq__(self, rhs):
+        return self.root == Expr(rhs).root
+    def __ne__(self, rhs):
+        return self.root != Expr(rhs).root
     def __lt__(self, rhs):
         try: return self.root.value < Expr(rhs).root.value
         except: return False
@@ -455,22 +454,22 @@ class Compiler(object):
                     try: del backrefs[offset]
                     except: pass
                 elif offset in backrefs:
-                    # we can merge changes[previ] and changes[i] if:
-                    # - no operation has changed cell k between them. (and such previ is
-                    #   backrefs[offset], as it is updated after change)
+                    # we can merge changes[target] and changes[i] if:
+                    # - no operation has changed cell k between them. (thus such target
+                    #   is backrefs[offset], as it is updated after change)
                     # - no operation has referenced cell k between them. it includes
-                    #   changes[previ] which is self-reference (like a = a + 4).
+                    #   changes[target] which is self-reference (like a = a + 4).
                     # - no operation has changed cell k' which is referenced by v.
-                    #   it includes changes[previ] too, if v references previous k.
-                    previ = backrefs[offset]
-                    if previ > usedrefs.get(offset, -1) and \
-                            all(previ > backrefs.get(ioffset, -1) for ioffset in refs):
+                    #   it includes changes[target] too, if v references targetous k.
+                    target = backrefs[offset]
+                    if target > usedrefs.get(offset, -1) and \
+                            all(target > backrefs.get(ioffset, -1) for ioffset in refs):
                         if isinstance(cur, SetMemory):
-                            node[previ] = cur
-                        elif isinstance(node[previ], SetMemory):
-                            node[previ].value += cur.delta
+                            node[target] = cur
+                        elif isinstance(node[target], SetMemory):
+                            node[target].value += cur.delta
                         else:
-                            node[previ].delta += cur.delta
+                            node[target].delta += cur.delta
                         del node[i]
                         merged = True
                     else:
@@ -478,11 +477,11 @@ class Compiler(object):
                 else:
                     backrefs[offset] = i
 
-            for ioffset in refs:
-                usedrefs[ioffset] = i
-
             if not merged:
+                target = i
                 i += 1
+            for ioffset in refs:
+                usedrefs[ioffset] = target
 
         return node
 
