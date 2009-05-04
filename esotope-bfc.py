@@ -263,7 +263,7 @@ class Node(object):
     def pure(self): return True
 
     # moves all memory references in it by offset.
-    # if it is not possible (like LoopWhile) canmovepointer should return False.
+    # if it is not possible (like WhileNotEqual) canmovepointer should return False.
     def canmovepointer(self, offset): return False
     def movepointer(self, offset): raise RuntimeError('not implemented')
 
@@ -523,10 +523,11 @@ class OutputConst(Node):
     def __repr__(self):
         return 'OutputConst[%r]' % self.str
 
-class If(ComplexNode):
-    def __init__(self, target, children=[]):
+class IfNotEqual(ComplexNode):
+    def __init__(self, target, value=0, children=[]):
         ComplexNode.__init__(self, children)
         self.target = target
+        self.value = value
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
@@ -545,7 +546,10 @@ class If(ComplexNode):
         return set([self.target]) | ComplexNode.updates(self)
 
     def emit(self, emitter):
-        emitter.write('if (mptr[%s]) {' % self.target)
+        if self.value == 0:
+            emitter.write('if (mptr[%s]) {' % self.target)
+        else:
+            emitter.write('if (mptr[%s] != %s) {' % (self.target, self.value))
         emitter.indent()
         for child in self:
             child.emit(emitter)
@@ -553,12 +557,17 @@ class If(ComplexNode):
         emitter.write('}')
 
     def __repr__(self):
-        return 'If[%r; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
+        if self.value == 0:
+            return 'If[mptr[%r]; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
+        else:
+            return 'If[mptr[%r]!=%r; %s]' % (self.target, self.value,
+                    ComplexNode.__repr__(self)[1:-1])
 
-class LoopWhile(ComplexNode):
-    def __init__(self, target, children=[]):
+class WhileNotEqual(ComplexNode):
+    def __init__(self, target, value=0, children=[]):
         ComplexNode.__init__(self, children)
         self.target = target
+        self.value = value
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
@@ -584,8 +593,23 @@ class LoopWhile(ComplexNode):
         emitter.dedent()
         emitter.write('}')
 
+    def emit(self, emitter):
+        if self.value == 0:
+            emitter.write('while (mptr[%s]) {' % self.target)
+        else:
+            emitter.write('while (mptr[%s] != %s) {' % (self.target, self.value))
+        emitter.indent()
+        for child in self:
+            child.emit(emitter)
+        emitter.dedent()
+        emitter.write('}')
+
     def __repr__(self):
-        return 'LoopWhile[%r; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
+        if self.value == 0:
+            return 'While[mptr[%r]; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
+        else:
+            return 'While[mptr[%r]!=%r; %s]' % (self.target, self.value,
+                    ComplexNode.__repr__(self)[1:-1])
 
 
 class Emitter(object):
@@ -632,7 +656,7 @@ class Compiler(object):
                     elif ch == ',':
                         nodestack[-1].append(Input(0))
                     elif ch == '[':
-                        nodestack.append(LoopWhile(0))
+                        nodestack.append(WhileNotEqual(0))
                     else:
                         if len(nodestack) < 2:
                             raise ValueError('Not matching ] at line %d' % (lineno+1))
@@ -682,7 +706,8 @@ class Compiler(object):
         for i, cur, replace in node.transforming():
             if isinstance(cur, AdjustMemory) and cur.offset + offsets not in changed:
                 replace(SetMemory(cur.offset, cur.delta))
-            elif isinstance(cur, (LoopWhile, If)) and cur.target + offsets not in changed:
+            elif isinstance(cur, (WhileNotEqual, IfNotEqual)) and \
+                    cur.target + offsets not in changed:
                 replace() # while(0) { ... } etc.
 
             ioffsets = cur.offsets()
@@ -696,8 +721,8 @@ class Compiler(object):
         return node
 
     # tries to optimize simple loops:
-    # - LoopWhile[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
-    # - LoopWhile[...] with offsets=0, no I/O, sets cell 0 to 0 within.
+    # - WhileNotEqual[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
+    # - WhileNotEqual[...] with offsets=0, no I/O, sets cell 0 to 0 within.
     # every arguments of memory operation in it should be simple.
     #
     # this pass is for optimizing very common cases, like multiplication loops.
@@ -710,7 +735,7 @@ class Compiler(object):
 
         inodes = []
         for i, cur, replace in node.transforming():
-            if isinstance(cur, LoopWhile) and cur.offsets() == 0 and cur.pure():
+            if isinstance(cur, WhileNotEqual) and cur.offsets() == 0 and cur.pure():
                 # check constraints.
                 cell = 0
                 cellset = False
@@ -722,7 +747,7 @@ class Compiler(object):
                         if change.offset == cur.target:
                             cell = change.value
                             cellset = True
-                        hasset = True # in this case we should use If[] instead.
+                        hasset = True # in this case we should use IfNotEqual[] instead.
                     elif isinstance(change, AdjustMemory):
                         if not change.delta.simple(): break
                         if change.offset == cur.target:
@@ -734,6 +759,7 @@ class Compiler(object):
                         if cell == 0:
                             multiplier = 1
                     else:
+                        # XXX use cur.value for correct loop count
                         if cell == 1:
                             multiplier = overflow - Expr[cur.target]
                         elif cell == -1:
@@ -747,8 +773,8 @@ class Compiler(object):
                             change.delta *= multiplier
                         result.append(change)
 
-                    if hasset: result = [If(cur.target, result)]
-                    result.append(SetMemory(cur.target, 0))
+                    if hasset: result = [IfNotEqual(cur.target, children=result)]
+                    result.append(SetMemory(cur.target, cur.value))
                     replace(*result)
                     continue
 
@@ -803,13 +829,13 @@ class Compiler(object):
             elif isinstance(cur, Output):
                 expr = cur.expr = cur.expr.withmemory(substs)
                 refs = expr.references()
-            else: # MovePointer, LoopWhile etc.
+            else: # MovePointer, WhileNotEqual etc.
                 replace(self.optimize_propagate(cur))
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
-                if isinstance(cur, (LoopWhile, If)):
-                    substs[cur.target] = Expr()
+                if isinstance(cur, (WhileNotEqual, IfNotEqual)):
+                    substs[cur.target] = cur.value
 
             merged = False
             if impure:
