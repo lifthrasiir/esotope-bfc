@@ -338,7 +338,6 @@ class ComplexNode(Node, list):
         while i < len(self):
             replacement[:] = [self[i]]
             yield i, self[i], replace
-            replacement = filter(None, replacement)
             self[i:i+1] = replacement
             i += len(replacement)
 
@@ -668,6 +667,17 @@ class Compiler(object):
             raise ValueError('Premature end of the loop')
         return nodestack[0]
 
+    def optimize(self, node):
+        node = self.optimize_simpleloop(node)
+        node = self.optimize_minptrmoves(node)
+        node = self.optimize_onceuponatime(node)
+        node = self.optimize_propagate(node)
+        node = self.optimize_simpleloop(node)
+        node = self.optimize_moreloop(node)
+        node = self.optimize_propagate(node)
+        node = self.optimize_stdlib(node)
+        return node
+
     # minimizes number of MovePointer nodes.
     def optimize_minptrmoves(self, node):
         if not isinstance(node, ComplexNode):
@@ -722,8 +732,8 @@ class Compiler(object):
 
     # tries to optimize simple loops:
     # - WhileNotEqual[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
+    #   every arguments of memory operation in it should be simple.
     # - WhileNotEqual[...] with offsets=0, no I/O, sets cell 0 to 0 within.
-    # every arguments of memory operation in it should be simple.
     #
     # this pass is for optimizing very common cases, like multiplication loops.
     # moreloop pass will turn other cases into for loops.
@@ -735,30 +745,40 @@ class Compiler(object):
 
         inodes = []
         for i, cur, replace in node.transforming():
-            if isinstance(cur, WhileNotEqual) and cur.offsets() == 0 and cur.pure():
+            if isinstance(cur, WhileNotEqual) and cur.offsets() == 0:
                 # check constraints.
                 cell = 0
-                cellset = False
-                hasset = False
+                cellset = None
+                targetnode = None
+                hasset = False # if set we should cover loop with IfNotEqual[].
+                complex = False # complex loop is ignored unless it's conditional.
                 multiplier = None
-                for change in cur:
-                    if isinstance(change, SetMemory):
-                        if not change.value.simple(): break
-                        if change.offset == cur.target:
-                            cell = change.value
+
+                for inode in cur:
+                    if isinstance(inode, SetMemory):
+                        if not inode.value.simple():
+                            complex = True
+                        if inode.offset == cur.target:
+                            cell = inode.value
                             cellset = True
-                        hasset = True # in this case we should use IfNotEqual[] instead.
-                    elif isinstance(change, AdjustMemory):
-                        if not change.delta.simple(): break
-                        if change.offset == cur.target:
-                            cell += change.delta
-                    elif isinstance(change, ComplexNode):
-                        break
+                            targetnode = inode
+                        hasset = True
+                    elif isinstance(inode, AdjustMemory):
+                        if not inode.delta.simple():
+                            complex = True
+                        if inode.offset == cur.target:
+                            cell += inode.delta
+                            targetnode = inode
+                    else:
+                        if not inode.pure():
+                            complex = True
+                        if isinstance(inode, ComplexNode):
+                            break
                 else:
                     if cellset:
                         if cell == 0:
                             multiplier = 1
-                    else:
+                    elif not complex:
                         # XXX use cur.value for correct loop count
                         if cell == 1:
                             multiplier = overflow - Expr[cur.target]
@@ -767,11 +787,11 @@ class Compiler(object):
 
                 if multiplier is not None:
                     result = []
-                    for change in cur:
-                        if change.offset == cur.target: continue
-                        if isinstance(change, AdjustMemory):
-                            change.delta *= multiplier
-                        result.append(change)
+                    for inode in cur:
+                        if inode is targetnode: continue
+                        if isinstance(inode, AdjustMemory):
+                            inode.delta *= multiplier
+                        result.append(inode)
 
                     if hasset: result = [IfNotEqual(cur.target, children=result)]
                     result.append(SetMemory(cur.target, cur.value))
@@ -811,16 +831,17 @@ class Compiler(object):
             elif isinstance(cur, AdjustMemory):
                 impure = mergable = True
                 offset = cur.offset
-                delta = cur.delta = cur.delta.withmemory(substs)
-                refs = delta.references()
+                value = cur.delta = cur.delta.withmemory(substs)
                 if offset in substs:
-                    substs[offset] += delta
+                    substs[offset] += value
                     if substs[offset].simple():
                         # replace with equivalent SetMemory node.
                         cur = SetMemory(offset, substs[offset])
+                        value = cur.value
                         replace(cur)
                     else:
                         del substs[offset]
+                refs = value.references()
             elif isinstance(cur, Input):
                 impure = True
                 offset = cur.offset
@@ -855,6 +876,8 @@ class Compiler(object):
                                 node[target].value += cur.delta
                             else:
                                 node[target].delta += cur.delta
+                            if not node[target]:
+                                node[target] = Nop()
                         else:
                             node[target] = cur
                         replace()
@@ -913,14 +936,7 @@ def main(argv):
 
     compiler = Compiler()
     node = compiler.parse(file(argv[1], 'r'))
-    node = compiler.optimize_simpleloop(node)
-    node = compiler.optimize_minptrmoves(node)
-    node = compiler.optimize_onceuponatime(node)
-    node = compiler.optimize_propagate(node)
-    node = compiler.optimize_simpleloop(node)
-    node = compiler.optimize_moreloop(node)
-    node = compiler.optimize_propagate(node)
-    node = compiler.optimize_stdlib(node)
+    node = compiler.optimize(node)
     node.emit(Emitter())
     return 0
 
