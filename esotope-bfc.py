@@ -3,7 +3,6 @@
 # Copyright (c) 2009, Kang Seonghoon.
 
 import sys
-from collections import namedtuple
 from cStringIO import StringIO
 
 try: import psyco; psyco.full()
@@ -1148,8 +1147,13 @@ def main(argv):
         print >>sys.stderr, 'Usage: %s filename' % argv[0]
         return 1
 
+    if argv[1] == '-':
+        fp = sys.stdin
+    else:
+        fp = open(argv[1], 'r')
+
     compiler = Compiler()
-    node = compiler.parse(file(argv[1], 'r'))
+    node = compiler.parse(fp)
     node = compiler.optimize(node)
     node.emit(Emitter())
     return 0
