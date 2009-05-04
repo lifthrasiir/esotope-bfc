@@ -15,12 +15,26 @@ _reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
 def _addslashes(s):
     return ''.join(_reprmap[ord(i)] for i in s)
 
+def _gcdex(x, y):
+    a = 0; b = 1
+    c = 1; d = 0
+    while x:
+        q = y / x; r = y % x
+        u = a - c * q; v = b - d * q
+        y = x; x = r
+        a = c; b = d
+        c = u; d = v
+    return (a, b, y)
+
 
 _EXPRNEG = '_'
 _EXPRREF = '@'
 _EXPRADD = '+'
 _EXPRMUL = '*'
-_EXPRARITYMAP = {_EXPRNEG: 1, _EXPRREF: 1, _EXPRADD: 2, _EXPRMUL: 2}
+_EXPRDIV = '/'
+_EXPRMOD = '%'
+_EXPRARITYMAP = {_EXPRNEG: 1, _EXPRREF: 1, _EXPRADD: 2, _EXPRMUL: 2,
+                 _EXPRDIV: 2, _EXPRMOD: 2}
 
 class _ExprMeta(type):
     def __getitem__(self, offset):
@@ -82,6 +96,35 @@ class Expr(object):
     def __rmul__(rhs, lhs):
         return Expr(lhs) * rhs
 
+    def __div__(lhs, rhs):
+        lhscode = lhs.code
+        rhscode = Expr(rhs).code
+        if len(lhscode) == 1:
+            if len(rhscode) == 1: return Expr(lhscode[0] / rhscode[0])
+            elif lhscode[0] == 0: return Expr()
+        elif len(rhscode) == 1:
+            if rhscode[0] == 1: return lhs
+            elif rhscode[0] == -1: return -lhs
+        return Expr(lhscode + rhscode + [_EXPRDIV])
+
+    def __rdiv__(rhs, lhs):
+        return Expr(lhs) / rhs
+
+    __truediv__ = __div__
+    __rtruediv__ = __rdiv__
+    __floordiv__ = __div__
+    __rfloordiv__ = __rdiv__
+
+    def __mod__(lhs, rhs):
+        lhscode = lhs.code
+        rhscode = Expr(rhs).code
+        if len(lhscode) == 1 and len(rhscode) == 1:
+            return Expr(lhscode[0] % rhscode[0])
+        return Expr(lhscode + rhscode + [_EXPRMOD])
+
+    def __rmod__(rhs, lhs):
+        return Expr(lhs) % rhs
+
     def __eq__(self, rhs):
         return self.code == Expr(rhs).code
 
@@ -125,7 +168,17 @@ class Expr(object):
         stack = []
 
         for c in code:
-            if c is _EXPRADD:
+            if c is _EXPRNEG:
+                arg = stack.pop()
+                if len(arg) == 1: result = [-arg[0]]
+                elif arg[-1] is _EXPRNEG: result = arg[:-1]
+                else: result = arg + [_EXPRNEG]
+
+            elif c is _EXPRREF:
+                arg = stack.pop()
+                result = arg + [_EXPRREF]
+
+            elif c is _EXPRADD:
                 rhs = stack.pop()
                 lhs = stack.pop()
                 result = lhs + rhs + [_EXPRADD]
@@ -149,15 +202,23 @@ class Expr(object):
                     elif rhs[0] == 1: result = lhs
                     elif rhs[0] == -1: result = lhs + [_EXPRNEG]
 
-            elif c is _EXPRNEG:
-                arg = stack.pop()
-                if len(arg) == 1: result = [-arg[0]]
-                elif arg[-1] is _EXPRNEG: result = arg[:-1]
-                else: result = arg + [_EXPRNEG]
+            elif c is _EXPRDIV:
+                rhs = stack.pop()
+                lhs = stack.pop()
+                result = lhs + rhs + [_EXPRDIV]
+                if len(lhs) == 1:
+                    if len(rhs) == 1: result = [lhs[0] / rhs[0]]
+                    elif lhs[0] == 0: result = []
+                elif len(rhs) == 1:
+                    if rhs[0] == 1: result = lhs
+                    elif rhs[0] == -1: result = lhs + [_EXPRNEG]
 
-            elif c is _EXPRREF:
-                arg = stack.pop()
-                result = arg + [_EXPRREF]
+            elif c is _EXPRMOD:
+                rhs = stack.pop()
+                lhs = stack.pop()
+                result = lhs + rhs + [_EXPRMOD]
+                if len(lhs) == 1 and len(rhs) == 1:
+                    result = [lhs[0] % rhs[0]]
 
             else:
                 result = [c]
@@ -235,7 +296,13 @@ class Expr(object):
     def __repr__(self):
         stack = []
         for c in self.code:
-            if c is _EXPRADD:
+            if c is _EXPRNEG:
+                arg = stack.pop()
+                stack.append('-%s' % arg)
+            elif c is _EXPRREF:
+                arg = stack.pop()
+                stack.append('mptr[%s]' % arg)
+            elif c is _EXPRADD:
                 rhs = stack.pop(); lhs = stack.pop()
                 if rhs.startswith('-'):
                     stack.append('(%s%s)' % (lhs, rhs))
@@ -244,15 +311,90 @@ class Expr(object):
             elif c is _EXPRMUL:
                 rhs = stack.pop(); lhs = stack.pop()
                 stack.append('(%s*%s)' % (lhs, rhs))
-            elif c is _EXPRNEG:
-                arg = stack.pop()
-                stack.append('-%s' % arg)
-            elif c is _EXPRREF:
-                arg = stack.pop()
-                stack.append('mptr[%s]' % arg)
+            elif c is _EXPRDIV:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s/%s)' % (lhs, rhs))
+            elif c is _EXPRMOD:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s%%%s)' % (lhs, rhs))
             else:
                 stack.append(str(c))
         return stack[-1]
+
+
+class Condition(object):
+    def __nonzero__(self): return True
+    def references(self): return set()
+    def movepointer(self, offset): return self
+    def withmemory(self): return self
+
+class Always(Condition):
+    def __str__(self): return '1'
+    def __repr__(self): return 'True'
+
+class Never(Condition):
+    def __nonzero__(self): return False
+    def __str__(self): return '0'
+    def __repr__(self): return 'False'
+
+class MemNotEqual(Condition):
+    def __init__(self, target, value=0):
+        self.target = target
+        self.value = value
+
+    def references(self):
+        return set([self.target])
+
+    def movepointer(self, offset):
+        return MemNotEqual(self.target + offset, self.value)
+
+    def withmemory(self, map):
+        try:
+            if map[self.target] == self.value:
+                return Always()
+            else:
+                return Never()
+        except KeyError:
+            return self
+
+    def __str__(self):
+        if self.value == 0:
+            return 'mptr[%s]' % self.target
+        else:
+            return 'mptr[%s] != %s' % (self.target, self.value)
+
+    def __repr__(self):
+        if self.value == 0:
+            return 'mptr[%r]' % self.target
+        else:
+            return 'mptr[%r]!=%r' % (self.target, self.value)
+
+class ExprNotEqual(Condition):
+    def __init__(self, expr, value=0):
+        self.expr = Expr(expr)
+        self.value = value
+
+    def references(self):
+        return self.expr.references()
+
+    def movepointer(self, offset):
+        return ExprNotEqual(self.expr.movepointer(offset), self.value)
+
+    def withmemory(self, map):
+        expr = self.expr.withmemory(map)
+        if expr.simple():
+            if int(expr) == self.value:
+                return Always()
+            else:
+                return Never()
+        else:
+            return ExprNotEqual(expr, self.value)
+
+    def __str__(self):
+        return '%s != %s' % (self.expr, self.value)
+
+    def __repr__(self):
+        return '%r!=%r' % (self.expr, self.value)
 
 
 class Node(object):
@@ -263,23 +405,31 @@ class Node(object):
     def pure(self): return True
 
     # moves all memory references in it by offset.
-    # if it is not possible (like WhileNotEqual) canmovepointer should return False.
+    # if it is not possible (like While) canmovepointer should return False.
     def canmovepointer(self, offset): return False
     def movepointer(self, offset): raise RuntimeError('not implemented')
 
     # specifies what this node does. optimizer assumes it does:
+    #
     # - changes the pointer by node.offsets().
     #   node.offsets() can return Expr object, or None if uncertain.
+    #
     # - references some or all memory cells in node.references().
     #   memory offsets here are relative to the final pointer, after
-    #   changed by node.offsets().
-    #   if it may refer other cells unspecified it should contain None.
+    #   changed by node.offsets(). if it may reference other cells unspecified
+    #   it should contain None.
+    #
     # - updates some or all memory cells in node.updates().
     #   this is similar to node.references(). in reality it behaves like
     #   "clobber" list, as even no memory cells have to be updated.
+    #
+    # - will run forever if node.returns() is False.
+    #   there could be an infinite loop with node.returns() = True, though.
+
     def offsets(self): return 0
     def references(self): return set()
     def updates(self): return set()
+    def returns(self): return True
 
 class ComplexNode(Node, list):
     def __nonzero__(self):
@@ -349,7 +499,7 @@ class Program(ComplexNode):
     def emit(self, emitter):
         emitter.write('/* generated by esotope-bfc */')
         emitter.write('#include <stdio.h>')
-        emitter.write('char mem[30000], *mptr = mem;')
+        emitter.write('unsigned char mem[30000], *mptr = mem;')
         emitter.write('int main(void) {')
         emitter.indent()
         for child in self:
@@ -523,58 +673,20 @@ class OutputConst(Node):
     def __repr__(self):
         return 'OutputConst[%r]' % self.str
 
-class IfNotEqual(ComplexNode):
-    def __init__(self, target, value=0, children=[]):
+class If(ComplexNode):
+    def __init__(self, cond=None, children=[]):
         ComplexNode.__init__(self, children)
-        self.target = target
-        self.value = value
-
-    def movepointer(self, offset):
-        ComplexNode.movepointer(self, offset)
-        self.target += offset
-
-    def offsets(self):
-        if ComplexNode.offsets(self) == 0:
-            return 0
+        if cond is None:
+            self.cond = MemNotEqual(0, 0)
         else:
-            return None
-
-    def references(self):
-        return set([self.target]) | ComplexNode.references(self)
-
-    def updates(self):
-        return ComplexNode.updates(self)
-
-    def emit(self, emitter):
-        if self.value == 0:
-            emitter.write('if (mptr[%s]) {' % self.target)
-        else:
-            emitter.write('if (mptr[%s] != %s) {' % (self.target, self.value))
-        emitter.indent()
-        for child in self:
-            child.emit(emitter)
-        emitter.dedent()
-        emitter.write('}')
-
-    def __repr__(self):
-        if self.value == 0:
-            return 'If[mptr[%r]; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
-        else:
-            return 'If[mptr[%r]!=%r; %s]' % (self.target, self.value,
-                    ComplexNode.__repr__(self)[1:-1])
-
-class WhileNotEqual(ComplexNode):
-    def __init__(self, target, value=0, children=[]):
-        ComplexNode.__init__(self, children)
-        self.target = target
-        self.value = value
+            self.cond = cond
 
     def __nonzero__(self):
-        return True # needs data flow analysis to determine this.
+        return bool(self.cond) and len(self) > 0
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
-        self.target += offset
+        self.cond = self.cond.movepointer(offset)
 
     def offsets(self):
         if ComplexNode.offsets(self) == 0:
@@ -583,16 +695,13 @@ class WhileNotEqual(ComplexNode):
             return None
 
     def references(self):
-        return set([self.target]) | ComplexNode.references(self)
+        return ComplexNode.references(self) | self.cond.references()
 
     def updates(self):
         return ComplexNode.updates(self)
 
     def emit(self, emitter):
-        if self.value == 0:
-            emitter.write('while (mptr[%s]) {' % self.target)
-        else:
-            emitter.write('while (mptr[%s] != %s) {' % (self.target, self.value))
+        emitter.write('if (%s) {' % self.cond)
         emitter.indent()
         for child in self:
             child.emit(emitter)
@@ -600,11 +709,52 @@ class WhileNotEqual(ComplexNode):
         emitter.write('}')
 
     def __repr__(self):
-        if self.value == 0:
-            return 'While[mptr[%r]; %s]' % (self.target, ComplexNode.__repr__(self)[1:-1])
+        return 'If[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
+
+class While(ComplexNode):
+    def __init__(self, cond=None, children=[]):
+        ComplexNode.__init__(self, children)
+        if cond is None:
+            self.cond = MemNotEqual(0, 0)
         else:
-            return 'While[mptr[%r]!=%r; %s]' % (self.target, self.value,
-                    ComplexNode.__repr__(self)[1:-1])
+            self.cond = cond
+
+    def __nonzero__(self):
+        # infinite loop should return True, even if there are no children.
+        return bool(self.cond)
+
+    def movepointer(self, offset):
+        ComplexNode.movepointer(self, offset)
+        self.cond = self.cond.movepointer(offset)
+
+    def offsets(self):
+        if ComplexNode.offsets(self) == 0:
+            return 0
+        else:
+            return None
+
+    def references(self):
+        return ComplexNode.references(self) | self.cond.references()
+
+    def updates(self):
+        return ComplexNode.updates(self)
+
+    def returns(self):
+        return isinstance(self.cond, Always)
+
+    def emit(self, emitter):
+        if isinstance(self.cond, Always) and len(self) == 0:
+            emitter.write('while (1); /* infinite loop */')
+        else:
+            emitter.write('while (%s) {' % self.cond)
+            emitter.indent()
+            for child in self:
+                child.emit(emitter)
+            emitter.dedent()
+            emitter.write('}')
+
+    def __repr__(self):
+        return 'While[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
 
 
 class Emitter(object):
@@ -651,7 +801,7 @@ class Compiler(object):
                     elif ch == ',':
                         nodestack[-1].append(Input(0))
                     elif ch == '[':
-                        nodestack.append(WhileNotEqual(0))
+                        nodestack.append(While())
                     else:
                         if len(nodestack) < 2:
                             raise ValueError('Not matching ] at line %d' % (lineno+1))
@@ -710,10 +860,11 @@ class Compiler(object):
         offsets = 0
         changed = set()
         for i, cur, replace in node.transforming():
-            if isinstance(cur, AdjustMemory) and cur.offset + offsets not in changed:
+            if isinstance(cur, AdjustMemory) and \
+                    cur.offset + offsets not in changed:
                 replace(SetMemory(cur.offset, cur.delta))
-            elif isinstance(cur, (WhileNotEqual, IfNotEqual)) and \
-                    cur.target + offsets not in changed:
+            elif isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual) and \
+                    cur.cond.target + offsets not in changed:
                 replace() # while(0) { ... } etc.
 
             ioffsets = cur.offsets()
@@ -727,9 +878,9 @@ class Compiler(object):
         return node
 
     # tries to optimize simple loops:
-    # - WhileNotEqual[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
-    #   every arguments of memory operation in it should be simple.
-    # - WhileNotEqual[...] with offsets=0, sets cell 0 to zero within it.
+    # - While[mptr[x]!=v; ...] with offsets=0, no I/O nor complex memory ops,
+    #   and adjust cell 0 by const amount within it.
+    # - While[mptr[x]!=v; ...] with offsets=0, sets cell 0 to zero within it.
     #
     # this pass is for optimizing very common cases, like multiplication loops.
     # moreloop pass will turn other cases into for loops.
@@ -737,61 +888,98 @@ class Compiler(object):
         if not isinstance(node, ComplexNode):
             return node
 
-        overflow = 256 # XXX hard-coded, must be the power of 2
+        overflow = 256 # XXX hard-coded
 
         inodes = []
         for i, cur, replace in node.transforming():
-            if isinstance(cur, WhileNotEqual) and cur.offsets() == 0:
+            if isinstance(cur, While) and isinstance(cur.cond, MemNotEqual) and \
+                    cur.offsets() == 0:
+                target = cur.cond.target
+                value = cur.cond.value
+
                 # check constraints.
                 cell = 0
                 cellset = None
-                targetnode = None
-                hasset = False # if set we should cover loop with IfNotEqual[].
+                tobeignored = None
+                mergable = True # may we merge the loop into parent?
                 complex = False # complex loop is ignored unless it's conditional.
                 multiplier = None
 
                 for inode in cur:
-                    if isinstance(inode, SetMemory):
-                        if not inode.value.simple():
-                            complex = True
-                        if inode.offset == cur.target:
-                            cell = inode.value
-                            cellset = True
-                            targetnode = inode
-                        hasset = True
-                    elif isinstance(inode, AdjustMemory):
+                    if isinstance(inode, AdjustMemory):
                         if not inode.delta.simple():
                             complex = True
-                        if inode.offset == cur.target:
+                        if inode.offset == target:
                             cell += inode.delta
-                            targetnode = inode
-                    else:
-                        if not inode.pure():
-                            complex = True
-                        if isinstance(inode, ComplexNode):
-                            break
+                            tobeignored = inode
+                    elif not isinstance(inode, Nop):
+                        mergable = False
+                        if isinstance(inode, SetMemory):
+                            if not inode.value.simple():
+                                complex = True
+                            if inode.offset == target:
+                                cell = inode.value
+                                cellset = True
+                                tobeignored = inode
+                        else:
+                            if not inode.pure():
+                                complex = True
+                            if isinstance(inode, ComplexNode):
+                                break
+
                 else:
+                    delta = (value - int(cell)) % overflow
                     if cellset:
-                        if cell == 0:
+                        if delta == 0:
                             multiplier = 1
+                            template = [If(cur.cond)]
+                            result = template[0]
+                        else:
+                            replace(While(Always()))
+                            continue
                     elif not complex:
-                        # XXX use cur.value for correct loop count
-                        if cell == 1:
-                            multiplier = overflow - Expr[cur.target]
-                        elif cell == -1:
-                            multiplier = Expr[cur.target]
+                        # let w be the overflow value, which is 256 for char etc.
+                        # then there are three cases in the following code:
+                        #     i = 0; for (j = 0; i != x; ++j) i += m;
+                        #
+                        # 1. if m = 0, it loops forever.
+                        # 2. otherwise, the condition j * m = x (mod w) must hold.
+                        #    let u * m + v * w = gcd(m,w), and
+                        #    1) if x is not a multiple of gcd(m,w), it loops forever.
+                        #    2) otherwise it terminates and j = u * (x / gcd(m,w)).
+                        #
+                        # we can calculate u and gcd(m,w) in the compile time, but
+                        # x is not (yet). so we shall add simple check for now.
+                        if delta == 0:
+                            replace(While(Always()))
+                            continue
+
+                        diff = Expr[target] - value
+
+                        u, v, gcd = _gcdex(delta, overflow)
+                        v -= delta * (u // overflow)
+                        u %= overflow # make u non-negative
+
+                        if mergable:
+                            template = []
+                            result = template
+                        else:
+                            template = [If(cur.cond)]
+                            result = template[0]
+                        if gcd != 1:
+                            template.insert(0,
+                                    If(ExprNotEqual(diff % gcd, 0), [While(Always())]))
+
+                        multiplier = u * (diff // gcd)
 
                 if multiplier is not None:
-                    result = []
                     for inode in cur:
-                        if inode is targetnode: continue
+                        if inode is tobeignored: continue
                         if isinstance(inode, AdjustMemory):
                             inode.delta *= multiplier
                         result.append(inode)
-
-                    if hasset: result = [IfNotEqual(cur.target, children=result)]
-                    result.append(SetMemory(cur.target, cur.value))
-                    replace(*result)
+                    template.append(SetMemory(target, value))
+                    replace(*template)
                     continue
 
             if isinstance(cur, ComplexNode):
@@ -814,7 +1002,9 @@ class Compiler(object):
             impure = mergable = False
             offset = None
             refs = []
-            if isinstance(cur, SetMemory):
+            if isinstance(cur, Nop):
+                pass
+            elif isinstance(cur, SetMemory):
                 impure = mergable = True
                 offset = cur.offset
                 value = cur.value = cur.value.withmemory(substs)
@@ -847,13 +1037,13 @@ class Compiler(object):
             elif isinstance(cur, Output):
                 expr = cur.expr = cur.expr.withmemory(substs)
                 refs = expr.references()
-            else: # MovePointer, WhileNotEqual etc.
+            else: # MovePointer, While etc.
                 replace(self.optimize_propagate(cur))
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
-                if isinstance(cur, (WhileNotEqual, IfNotEqual)):
-                    substs[cur.target] = cur.value
+                if isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual):
+                    substs[cur.cond.target] = cur.cond.value
 
             merged = False
             if impure:
