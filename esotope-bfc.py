@@ -813,11 +813,7 @@ class Compiler(object):
 
             merged = False
             if impure:
-                if not mergable:
-                    # prohibit next merging attempt.
-                    try: del backrefs[offset]
-                    except: pass
-                elif offset in backrefs:
+                if offset in backrefs:
                     # we can merge node[target] and node[i] if:
                     # - no operation has changed cell k between them. (thus such target
                     #   is backrefs[offset], as it is updated after change)
@@ -828,17 +824,21 @@ class Compiler(object):
                     target = backrefs[offset]
                     if target > usedrefs.get(offset, -1) and \
                             all(target > backrefs.get(ioffset, -1) for ioffset in refs):
-                        if isinstance(cur, SetMemory):
-                            node[target] = SetMemory(offset, cur.value)
-                        elif isinstance(node[target], SetMemory):
-                            node[target].value += cur.delta
+                        if isinstance(cur, AdjustMemory):
+                            if isinstance(node[target], SetMemory):
+                                node[target].value += cur.delta
+                            else:
+                                node[target].delta += cur.delta
                         else:
-                            node[target].delta += cur.delta
+                            node[target] = cur
                         replace()
                         merged = True
-                    else:
-                        backrefs[offset] = i
-                else:
+
+                if not mergable:
+                    # prohibit next merging attempt.
+                    try: del backrefs[offset]
+                    except: pass
+                elif not merged:
                     backrefs[offset] = i
 
             if not merged:
