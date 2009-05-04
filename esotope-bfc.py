@@ -860,35 +860,36 @@ class Compiler(object):
 
             merged = False
             if impure:
-                if offset in backrefs:
-                    # we can merge node[target] and node[i] if:
-                    # - no operation has changed cell k between them. (thus such target
-                    #   is backrefs[offset], as it is updated after change)
-                    # - no operation has referenced cell k between them. it includes
-                    #   node[target] which is self-reference (like a = a + 4).
-                    # - no operation has changed cell k' which is referenced by v.
-                    #   it includes node[target] too, if v references target k.
-                    target = backrefs[offset]
-                    if target > usedrefs.get(offset, -1) and \
-                            all(target > backrefs.get(ioffset, -1) for ioffset in refs):
-                        if isinstance(cur, AdjustMemory):
-                            if isinstance(node[target], SetMemory):
-                                node[target].value += cur.delta
-                            else:
-                                node[target].delta += cur.delta
-                            if not node[target]:
-                                node[target] = Nop()
-                        else:
-                            node[target] = cur
-                        replace()
-                        merged = True
-
                 if not mergable:
                     # prohibit next merging attempt.
                     try: del backrefs[offset]
                     except: pass
-                elif not merged:
-                    backrefs[offset] = i
+                else:
+                    if offset in backrefs:
+                        # we can merge node[target] and node[i] if:
+                        # - no operation has changed cell k between them. (thus such target
+                        #   is backrefs[offset], as it is updated after change)
+                        # - no operation has referenced cell k between them. it includes
+                        #   node[target] which is self-reference (like a = a + 4).
+                        # - no operation has changed cell k' which is referenced by v.
+                        #   it includes node[target] too, if v references target k.
+                        target = backrefs[offset]
+                        if target > usedrefs.get(offset, -1) and \
+                                all(target > backrefs.get(ioffset, -1) for ioffset in refs):
+                            if isinstance(cur, AdjustMemory):
+                                if isinstance(node[target], SetMemory):
+                                    node[target].value += cur.delta
+                                else:
+                                    node[target].delta += cur.delta
+                                if not node[target]:
+                                    node[target] = Nop()
+                            else:
+                                node[target] = cur
+                            replace()
+                            merged = True
+
+                    if not merged:
+                        backrefs[offset] = i
 
             if not merged:
                 target = i
