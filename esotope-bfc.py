@@ -269,13 +269,14 @@ class Node(object):
 
     # specifies what this node does. optimizer assumes it does:
     # - changes the pointer by node.offsets().
-    # - references (at least) all memory cells in node.references().
-    # - updates (at least) all memory cells in node.updates().
-    #
-    # node.offsets() can return Expr object, or None if uncertain.
-    # node.references() and node.updates() is a set containing memory offset
-    # relative to the final (after moved by node.offsets()) pointer.
-    # if the set contains None, it can reference or update other unspecificed cells.
+    #   node.offsets() can return Expr object, or None if uncertain.
+    # - references some or all memory cells in node.references().
+    #   memory offsets here are relative to the final pointer, after
+    #   changed by node.offsets().
+    #   if it may refer other cells unspecified it should contain None.
+    # - updates some or all memory cells in node.updates().
+    #   this is similar to node.references(). in reality it behaves like
+    #   "clobber" list, as even no memory cells have to be updated.
     def offsets(self): return 0
     def references(self): return set()
     def updates(self): return set()
@@ -542,7 +543,7 @@ class IfNotEqual(ComplexNode):
         return set([self.target]) | ComplexNode.references(self)
 
     def updates(self):
-        return set([self.target]) | ComplexNode.updates(self)
+        return ComplexNode.updates(self)
 
     def emit(self, emitter):
         if self.value == 0:
@@ -568,6 +569,9 @@ class WhileNotEqual(ComplexNode):
         self.target = target
         self.value = value
 
+    def __nonzero__(self):
+        return True # needs data flow analysis to determine this.
+
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
         self.target += offset
@@ -582,15 +586,7 @@ class WhileNotEqual(ComplexNode):
         return set([self.target]) | ComplexNode.references(self)
 
     def updates(self):
-        return set([self.target]) | ComplexNode.updates(self)
-
-    def emit(self, emitter):
-        emitter.write('while (mptr[%s]) {' % self.target)
-        emitter.indent()
-        for child in self:
-            child.emit(emitter)
-        emitter.dedent()
-        emitter.write('}')
+        return ComplexNode.updates(self)
 
     def emit(self, emitter):
         if self.value == 0:
@@ -733,7 +729,7 @@ class Compiler(object):
     # tries to optimize simple loops:
     # - WhileNotEqual[...] with offsets=0, no I/O, changes cell 0 by -1 or +1 within it.
     #   every arguments of memory operation in it should be simple.
-    # - WhileNotEqual[...] with offsets=0, no I/O, sets cell 0 to 0 within.
+    # - WhileNotEqual[...] with offsets=0, sets cell 0 to zero within it.
     #
     # this pass is for optimizing very common cases, like multiplication loops.
     # moreloop pass will turn other cases into for loops.
@@ -822,12 +818,12 @@ class Compiler(object):
                 impure = mergable = True
                 offset = cur.offset
                 value = cur.value = cur.value.withmemory(substs)
-                refs = value.references()
                 if value.simple():
                     substs[offset] = value
                 else:
                     try: del substs[offset]
                     except: pass
+                refs = value.references()
             elif isinstance(cur, AdjustMemory):
                 impure = mergable = True
                 offset = cur.offset
@@ -842,6 +838,7 @@ class Compiler(object):
                     else:
                         del substs[offset]
                 refs = value.references()
+                refs.add(offset)
             elif isinstance(cur, Input):
                 impure = True
                 offset = cur.offset
@@ -865,17 +862,17 @@ class Compiler(object):
                     try: del backrefs[offset]
                     except: pass
                 else:
+                    # we can merge node[target] and node[i] if:
+                    # - no operation has changed cell k between them. (thus such target
+                    #   is backrefs[offset], as it is updated after change)
+                    # - no operation has referenced the target cell between them.
+                    #   node[target] itself could reference that cell.
+                    # - no operation has changed cell(s) referenced by value.
+                    #   similar to above, node[target] is excluded from this rule.
                     if offset in backrefs:
-                        # we can merge node[target] and node[i] if:
-                        # - no operation has changed cell k between them. (thus such target
-                        #   is backrefs[offset], as it is updated after change)
-                        # - no operation has referenced cell k between them. it includes
-                        #   node[target] which is self-reference (like a = a + 4).
-                        # - no operation has changed cell k' which is referenced by v.
-                        #   it includes node[target] too, if v references target k.
                         target = backrefs[offset]
-                        if target > usedrefs.get(offset, -1) and \
-                                all(target > backrefs.get(ioffset, -1) for ioffset in refs):
+                        if target >= usedrefs.get(offset, -1) and \
+                                all(target >= backrefs.get(ioffset, -1) for ioffset in refs):
                             if isinstance(cur, AdjustMemory):
                                 if isinstance(node[target], SetMemory):
                                     node[target].value += cur.delta
