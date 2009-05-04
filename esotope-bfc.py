@@ -326,7 +326,7 @@ class Condition(object):
     def __nonzero__(self): return True
     def references(self): return set()
     def movepointer(self, offset): return self
-    def withmemory(self): return self
+    def withmemory(self, map): return self
 
 class Always(Condition):
     def __str__(self): return '1'
@@ -350,7 +350,7 @@ class MemNotEqual(Condition):
 
     def withmemory(self, map):
         try:
-            if map[self.target] == self.value:
+            if map[self.target] != self.value:
                 return Always()
             else:
                 return Never()
@@ -383,7 +383,7 @@ class ExprNotEqual(Condition):
     def withmemory(self, map):
         expr = self.expr.withmemory(map)
         if expr.simple():
-            if int(expr) == self.value:
+            if int(expr) != self.value:
                 return Always()
             else:
                 return Never()
@@ -398,7 +398,7 @@ class ExprNotEqual(Condition):
 
 
 class Node(object):
-    # returns False if it is a no-op. minptrmoves pass will remove such no-ops.
+    # returns False if it is a no-op. cleanup pass will remove such no-ops.
     def __nonzero__(self): return True
 
     # returns False if it does an input or output, thus cannot be reordered.
@@ -408,6 +408,9 @@ class Node(object):
     # if it is not possible (like While) canmovepointer should return False.
     def canmovepointer(self, offset): return False
     def movepointer(self, offset): raise RuntimeError('not implemented')
+
+    # propagates known memory cells given.
+    def withmemory(self, map): pass
 
     # specifies what this node does. optimizer assumes it does:
     #
@@ -533,6 +536,9 @@ class SetMemory(Node):
         self.offset += offset
         self.value = self.value.movepointer(offset)
 
+    def withmemory(self, map):
+        self.value = self.value.withmemory(map)
+
     def references(self):
         return self.value.references()
 
@@ -559,6 +565,9 @@ class AdjustMemory(Node):
     def movepointer(self, offset):
         self.offset += offset
         self.delta = self.delta.movepointer(offset)
+
+    def withmemory(self, map):
+        self.delta = self.delta.withmemory(map)
 
     def references(self):
         return set([self.offset]) | self.delta.references()
@@ -635,6 +644,9 @@ class Output(Node):
     def canmovepointer(self, offset):
         return True
 
+    def withmemory(self, map):
+        self.expr = self.expr.withmemory(map)
+
     def references(self):
         return self.expr.references()
 
@@ -688,6 +700,9 @@ class If(ComplexNode):
         ComplexNode.movepointer(self, offset)
         self.cond = self.cond.movepointer(offset)
 
+    def withmemory(self, map):
+        self.cond = self.cond.withmemory(map)
+
     def offsets(self):
         if ComplexNode.offsets(self) == 0:
             return 0
@@ -727,6 +742,11 @@ class While(ComplexNode):
         ComplexNode.movepointer(self, offset)
         self.cond = self.cond.movepointer(offset)
 
+    def withmemory(self, map):
+        # updates condition only if the loop will be never executed.
+        newcond = self.cond.withmemory(map)
+        if isinstance(newcond, Never): self.cond = newcond
+
     def offsets(self):
         if ComplexNode.offsets(self) == 0:
             return 0
@@ -740,7 +760,7 @@ class While(ComplexNode):
         return ComplexNode.updates(self)
 
     def returns(self):
-        return isinstance(self.cond, Always)
+        return not isinstance(self.cond, Always)
 
     def emit(self, emitter):
         if isinstance(self.cond, Always) and len(self) == 0:
@@ -815,17 +835,23 @@ class Compiler(object):
 
     def optimize(self, node):
         node = self.optimize_simpleloop(node)
-        node = self.optimize_minptrmoves(node)
+        node = self.optimize_cleanup(node)
         node = self.optimize_onceuponatime(node)
         node = self.optimize_propagate(node)
         node = self.optimize_simpleloop(node)
         node = self.optimize_moreloop(node)
         node = self.optimize_propagate(node)
+        node = self.optimize_cleanup(node)
         node = self.optimize_stdlib(node)
         return node
 
-    # minimizes number of MovePointer nodes.
-    def optimize_minptrmoves(self, node):
+    # general node cleanup routine. it does the following jobs:
+    # - removes every no-op nodes.
+    # - flattens If[True; ...] node to parent.
+    # - merges MovePointer[] nodes as much as possible, and adjusts
+    #   other nodes accordingly.
+    # - removes every (dead) nodes after non-returning node.
+    def optimize_cleanup(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
@@ -844,8 +870,15 @@ class Compiler(object):
                     # movepointer failed, flush current MovePointer node before it
                     if offset != 0: result.append(MovePointer(offset))
                     offset = 0
-                result.append(self.optimize_minptrmoves(cur))
+                result.append(self.optimize_cleanup(cur))
                 replace(*result)
+
+                # if this command doesn't return, ignore all nodes after it.
+                if not result[-1].returns():
+                    del node[i+len(result):]
+                    offset = 0
+                    break
+
         if offset != 0:
             node.append(MovePointer(offset))
 
@@ -957,8 +990,7 @@ class Compiler(object):
                         diff = Expr[target] - value
 
                         u, v, gcd = _gcdex(delta, overflow)
-                        v -= delta * (u // overflow)
-                        u %= overflow # make u non-negative
+                        multiplier = (u % overflow) * (diff // gcd)
 
                         if mergable:
                             template = []
@@ -969,8 +1001,6 @@ class Compiler(object):
                         if gcd != 1:
                             template.insert(0,
                                     If(ExprNotEqual(diff % gcd, 0), [While(Always())]))
-
-                        multiplier = u * (diff // gcd)
 
                 if multiplier is not None:
                     for inode in cur:
@@ -999,44 +1029,39 @@ class Compiler(object):
         substs = {} # only for simple one, unless some vars are not current
 
         for i, cur, replace in node.transforming():
-            impure = mergable = False
+            cur.withmemory(substs)
+
+            alters = mergable = False
             offset = None
             refs = []
             if isinstance(cur, Nop):
                 pass
             elif isinstance(cur, SetMemory):
-                impure = mergable = True
+                alters = mergable = True
                 offset = cur.offset
-                value = cur.value = cur.value.withmemory(substs)
-                if value.simple():
-                    substs[offset] = value
+                if cur.value.simple():
+                    substs[offset] = cur.value
                 else:
                     try: del substs[offset]
                     except: pass
-                refs = value.references()
             elif isinstance(cur, AdjustMemory):
-                impure = mergable = True
+                alters = mergable = True
                 offset = cur.offset
-                value = cur.delta = cur.delta.withmemory(substs)
                 if offset in substs:
-                    substs[offset] += value
+                    substs[offset] += cur.delta
                     if substs[offset].simple():
                         # replace with equivalent SetMemory node.
                         cur = SetMemory(offset, substs[offset])
-                        value = cur.value
                         replace(cur)
                     else:
                         del substs[offset]
-                refs = value.references()
-                refs.add(offset)
             elif isinstance(cur, Input):
-                impure = True
+                alters = True
                 offset = cur.offset
                 try: del substs[offset]
                 except: pass
             elif isinstance(cur, Output):
-                expr = cur.expr = cur.expr.withmemory(substs)
-                refs = expr.references()
+                pass
             else: # MovePointer, While etc.
                 replace(self.optimize_propagate(cur))
                 backrefs.clear()
@@ -1045,8 +1070,9 @@ class Compiler(object):
                 if isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual):
                     substs[cur.cond.target] = cur.cond.value
 
+            refs = cur.references()
             merged = False
-            if impure:
+            if alters:
                 if not mergable:
                     # prohibit next merging attempt.
                     try: del backrefs[offset]
