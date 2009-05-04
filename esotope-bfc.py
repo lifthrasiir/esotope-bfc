@@ -6,6 +6,9 @@ import sys
 from collections import namedtuple
 from cStringIO import StringIO
 
+try: import psyco; psyco.full()
+except ImportError: pass
+
 _reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
 _reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
 _reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
@@ -13,230 +16,243 @@ def _addslashes(s):
     return ''.join(_reprmap[ord(i)] for i in s)
 
 
+_EXPRNEG = '_'
+_EXPRREF = '@'
+_EXPRADD = '+'
+_EXPRMUL = '*'
+_EXPRARITYMAP = {_EXPRNEG: 1, _EXPRREF: 1, _EXPRADD: 2, _EXPRMUL: 2}
+
 class _ExprMeta(type):
     def __getitem__(self, offset):
-        return Expr(Expr.MemoryRef(offset))
+        return Expr(Expr(offset).code + [_EXPRREF])
 
 class Expr(object):
     __metaclass__ = _ExprMeta
-    __slots__ = ['root']
-
-    class _exprbase(tuple):
-        def __new__(cls, *args):
-            if not args: raise TypeError('empty arguments')
-            return tuple.__new__(cls, args)
-        def __eq__(self, rhs):
-            return self.__class__ is rhs.__class__ and tuple.__eq__(self, rhs)
-        def __ne__(self, rhs):
-            return self.__class__ is not rhs.__class__ or tuple.__ne__(self, rhs)
-
-    class Number(namedtuple('Number', 'value'), _exprbase):
-        def __str__(self): return str(self.value)
-        def __repr__(self): return repr(self.value)
-
-        def simplify(self):
-            return self
-
-        def apply(self, func, merge=None):
-            return func(self)
-
-    class MemoryRef(namedtuple('MemoryRef', 'offset'), _exprbase):
-        def __str__(self): return 'mptr[%s]' % self.offset
-        def __repr__(self): return 'mptr[%r]' % self.offset
-
-        def simplify(self):
-            return self
-
-        def apply(self, func, merge=None):
-            return func(self)
-
-    class Negate(namedtuple('Negate', 'expr'), _exprbase):
-        def __str__(self): return '-%s' % (self.expr,)
-        def __repr__(self): return '-%r' % (self.expr,)
-
-        def simplify(self):
-            if isinstance(self.expr, Expr.Number):
-                return Expr.Number(-self.expr.value)
-            if isinstance(self.expr, Expr.Negate):
-                return self.expr
-            if isinstance(self.expr, Expr.Sum):
-                return Expr.Sum(*[Expr.Negate(child).simplify() for child in self.expr])
-            return Expr.Negate(self.expr.simplify())
-
-        def apply(self, func, merge=None):
-            return (merge or Expr.Negate)(self.expr.apply(func, merge))
-
-    class Sum(_exprbase):
-        def _prettify(self, func):
-            items = [func(self[0])]
-            for child in self[1:]:
-                if isinstance(child, Expr.Negate):
-                    items.extend(['-', func(child.expr)])
-                elif isinstance(child, Expr.Number) and child.value < 0:
-                    items.extend(['-', func(-child.value)])
-                else:
-                    items.extend(['+', func(child)])
-            return items
-
-        def __str__(self): return '(%s)' % ' '.join(self._prettify(str))
-        def __repr__(self): return '(%s)' % ''.join(self._prettify(repr))
-
-        def simplify(self):
-            result = []
-            numbersum = 0
-            for child in self:
-                child = child.simplify()
-                if isinstance(child, Expr.Number):
-                    numbersum += child.value
-                elif isinstance(child, Expr.Sum):
-                    result.extend(child)
-                else:
-                    result.append(child)
-            if numbersum != 0:
-                result.append(Expr.Number(numbersum))
-
-            if len(result) == 0:
-                return Expr.Number(0)
-            elif len(result) == 1:
-                return result[0]
-            else:
-                return Expr.Sum(*result)
-
-        def apply(self, func, merge=None):
-            return (merge or Expr.Sum)(*[i.apply(func, merge) for i in self])
-
-    class Product(_exprbase):
-        def __str__(self): return '(%s)' % ' * '.join(map(str, self))
-        def __repr__(self): return '(%s)' % '*'.join(map(repr, self))
-
-        def simplify(self):
-            result = []
-            numberprod = 1
-            for child in self:
-                child = child.simplify()
-                if isinstance(child, Expr.Number):
-                    numberprod *= child.value
-                elif isinstance(child, Expr.Product):
-                    result.extend(child)
-                else:
-                    result.append(child)
-            if numberprod != 0:
-                result.append(Expr.Number(numberprod))
-            else:
-                del result[:]
-
-            if len(result) == 0:
-                return Expr.Number(0)
-            elif len(result) == 1:
-                return result[0]
-            else:
-                return Expr.Product(*result)
-
-        def apply(self, func, merge=None):
-            return (merge or Expr.Product)(*[i.apply(func, merge) for i in self])
+    __slots__ = ['code']
 
     def __init__(self, obj=0):
         if isinstance(obj, (int, long)):
-            self.root = Expr.Number(obj)
-        elif isinstance(obj, Expr):
-            self.root = obj.root
+            self.code = [obj]
         else:
-            self.root = obj
+            if isinstance(obj, Expr): obj = obj.code
+            self.code = obj[:]
 
     def __neg__(self):
-        if isinstance(self.root, Expr.Negate): return Expr(self.root.expr)
-        if isinstance(self.root, Expr.Number): return Expr(-self.root.value)
-        return Expr(Expr.Negate(self.root))
+        code = self.code
+        if len(code) == 1: return Expr(-code[0])
+        if code[-1] is _EXPRNEG: return Expr(code[:-1])
+        return Expr(code + [_EXPRNEG])
 
     def __pos__(self):
         return self
 
     def __add__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
-            return Expr(lhs.root.value + rhs.root.value)
-        if lhs == 0: return rhs
-        if rhs == 0: return lhs
+        lhscode = lhs.code
+        rhscode = Expr(rhs).code
+        if len(lhscode) == 1:
+            if len(rhscode) == 1: return Expr(lhscode[0] + rhscode[0])
+            elif lhscode[0] == 0: return rhs
+        elif len(rhscode) == 1:
+            if rhscode[0] == 0: return lhs
+        return Expr(lhscode + rhscode + [_EXPRADD])
 
-        lhsroot = lhs.root
-        rhsroot = rhs.root
-        if not isinstance(lhsroot, Expr.Sum): lhsroot = (lhsroot,)
-        if not isinstance(rhsroot, Expr.Sum): rhsroot = (rhsroot,)
-        return Expr(Expr.Sum(*(lhsroot + rhsroot)))
+    def __radd__(rhs, lhs):
+        return Expr(lhs) + rhs
 
-    def __radd__(rhs, lhs): return Expr(lhs) + rhs
-    def __sub__(lhs, rhs): return lhs + (-rhs)
-    def __rsub__(rhs, lhs): return lhs + (-rhs)
+    def __sub__(lhs, rhs):
+        return lhs + (-rhs)
+
+    def __rsub__(rhs, lhs):
+        return lhs + (-rhs)
 
     def __mul__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isinstance(lhs.root, Expr.Number) and isinstance(rhs.root, Expr.Number):
-            return Expr(lhs.root.value * rhs.root.value)
-        if lhs == 0 or rhs == 0: return Expr()
-        if lhs == 1: return rhs
-        if rhs == 1: return lhs
-        if lhs == -1: return -rhs
-        if rhs == -1: return -lhs
+        lhscode = lhs.code
+        rhscode = Expr(rhs).code
+        if len(lhscode) == 1:
+            if len(rhscode) == 1: return Expr(lhscode[0] * rhscode[0])
+            elif lhscode[0] == 0: return Expr()
+            elif lhscode[0] == 1: return rhs
+            elif lhscode[0] == -1: return -rhs
+        elif len(rhscode) == 1:
+            if rhscode[0] == 0: return Expr()
+            elif rhscode[0] == 1: return lhs
+            elif rhscode[0] == -1: return -lhs
+        return Expr(lhscode + rhscode + [_EXPRMUL])
 
-        lhsroot = lhs.root
-        rhsroot = rhs.root
-        if not isinstance(lhsroot, Expr.Product): lhsroot = (lhsroot,)
-        if not isinstance(rhsroot, Expr.Product): rhsroot = (rhsroot,)
-        return Expr(Expr.Product(*(lhsroot + rhsroot)))
-
-    def __rmul__(rhs, lhs): return Expr(lhs) * rhs
+    def __rmul__(rhs, lhs):
+        return Expr(lhs) * rhs
 
     def __eq__(self, rhs):
-        return self.root == Expr(rhs).root
+        return self.code == Expr(rhs).code
+
     def __ne__(self, rhs):
-        return self.root != Expr(rhs).root
-    def __lt__(self, rhs):
-        try: return self.root.value < Expr(rhs).root.value
+        return self.code != Expr(rhs).code
+
+    def __lt__(lhs, rhs):
+        try:
+            lhsvalue, = lhs.code; rhsvalue, = Expr(rhs).code
+            return lhsvalue < rhsvalue
         except: return False
-    def __le__(self, rhs):
-        try: return self.root.value <= Expr(rhs).root.value
+
+    def __le__(lhs, rhs):
+        try:
+            lhsvalue, = lhs.code; rhsvalue, = Expr(rhs).code
+            return lhsvalue <= rhsvalue
         except: return False
-    def __gt__(self, rhs):
-        try: return self.root.value > Expr(rhs).root.value
+
+    def __gt__(lhs, rhs):
+        try:
+            lhsvalue, = lhs.code; rhsvalue, = Expr(rhs).code
+            return lhsvalue > rhsvalue
         except: return False
-    def __ge__(self, rhs):
-        try: return self.root.value >= Expr(rhs).root.value
+
+    def __ge__(lhs, rhs):
+        try:
+            lhsvalue, = lhs.code; rhsvalue, = Expr(rhs).code
+            return lhsvalue >= rhsvalue
         except: return False
+
+    def __hash__(self):
+        if self.simple():
+            return hash(self.code[0])
+        return hash(tuple(self.code))
 
     def __int__(self):
         assert self.simple()
-        return self.root.value
+        return self.code[0]
+
+    def _simplify(self, code):
+        stack = []
+
+        for c in code:
+            if c is _EXPRADD:
+                rhs = stack.pop()
+                lhs = stack.pop()
+                result = lhs + rhs + [_EXPRADD]
+                if len(lhs) == 1:
+                    if len(rhs) == 1: result = [lhs[0] + rhs[0]]
+                    elif lhs[0] == 0: result = rhs
+                elif len(rhs) == 1:
+                    if rhs[0] == 0: result = lhs
+
+            elif c is _EXPRMUL:
+                rhs = stack.pop()
+                lhs = stack.pop()
+                result = lhs + rhs + [_EXPRMUL]
+                if len(lhs) == 1:
+                    if len(rhs) == 1: result = [lhs[0] * rhs[0]]
+                    elif lhs[0] == 0: result = [0]
+                    elif lhs[0] == 1: result = rhs
+                    elif lhs[0] == -1: result = rhs + [_EXPRNEG]
+                elif len(rhs) == 1:
+                    if rhs[0] == 0: result = [0]
+                    elif rhs[0] == 1: result = lhs
+                    elif rhs[0] == -1: result = lhs + [_EXPRNEG]
+
+            elif c is _EXPRNEG:
+                arg = stack.pop()
+                if len(arg) == 1: result = [-arg[0]]
+                elif arg[-1] is _EXPRNEG: result = arg[:-1]
+                else: result = arg + [_EXPRNEG]
+
+            elif c is _EXPRREF:
+                arg = stack.pop()
+                result = arg + [_EXPRREF]
+
+            else:
+                result = [c]
+
+            stack.append(result)
+
+        return stack[-1]
+
+    def _getpartial(self, code, i):
+        arityneeded = []
+        while True:
+            arityneeded.append(_EXPRARITYMAP.get(code[i], 0))
+            while arityneeded[-1] == 0:
+                del arityneeded[-1]
+                if not arityneeded: return i
+                arityneeded[-1] -= 1
+            i -= 1
 
     def simple(self):
-        return isinstance(self.root, Expr.Number)
+        return len(self.code) == 1
 
     def simplify(self):
-        return Expr(self.root.simplify())
+        return Expr(self._simplify(self.code))
 
     def references(self):
-        def func(node):
-            if not isinstance(node, Expr.MemoryRef): return set()
-            return set([node.offset])
-        return self.root.apply(func, set.union)
+        code = self.code
+        getpartial = self._getpartial
+
+        refs = set()
+        for i in xrange(len(code)):
+            if code[i] is _EXPRREF:
+                refs.add(Expr(code[getpartial(code, i-1):i]))
+        return refs
 
     def movepointer(self, delta):
-        def func(node):
-            if not isinstance(node, Expr.MemoryRef): return node
-            return Expr.MemoryRef(node.offset + delta)
-        return Expr(self.root.apply(func))
+        code = self.code
+        getpartial = self._getpartial
+        simplify = self._simplify
+
+        newcode = []
+        lastref = 0
+        i = 0
+        for i in xrange(len(code)):
+            if code[i] is _EXPRREF:
+                assert isinstance(code[i-1], (int, long)) # XXX
+                newcode.extend(code[lastref:i-1])
+                newcode.append(code[i-1] + delta)
+                lastref = i # this contains _EXPRREF, which is copied later
+        newcode.extend(code[lastref:])
+        return Expr(newcode)
 
     def withmemory(self, map):
-        def func(node):
-            if not isinstance(node, Expr.MemoryRef): return node
-            try: return map[node.offset].root # assume Expr object
-            except: return node
-        return Expr(self.root.apply(func).simplify())
+        code = self.code
+        getpartial = self._getpartial
+
+        newcode = []
+        lastref = 0
+        i = 0
+        for i in xrange(len(code)):
+            if code[i] is _EXPRREF:
+                assert isinstance(code[i-1], (int, long)) # XXX
+                newcode.extend(code[lastref:i-1])
+                try:
+                    newcode.extend(Expr(map[code[i-1]]).code)
+                except KeyError:
+                    newcode.extend(code[i-1:i+1])
+                lastref = i + 1
+        newcode.extend(code[lastref:])
+        return Expr(self._simplify(newcode))
 
     def __str__(self):
-        return str(self.root)
+        self.code = self._simplify(self.code)
+        return repr(self)
 
     def __repr__(self):
-        return repr(self.root)
+        stack = []
+        for c in self.code:
+            if c is _EXPRADD:
+                rhs = stack.pop(); lhs = stack.pop()
+                if rhs.startswith('-'):
+                    stack.append('(%s%s)' % (lhs, rhs))
+                else:
+                    stack.append('(%s+%s)' % (lhs, rhs))
+            elif c is _EXPRMUL:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s*%s)' % (lhs, rhs))
+            elif c is _EXPRNEG:
+                arg = stack.pop()
+                stack.append('-%s' % arg)
+            elif c is _EXPRREF:
+                arg = stack.pop()
+                stack.append('mptr[%s]' % arg)
+            else:
+                stack.append(str(c))
+        return stack[-1]
 
 
 class Node(object):
@@ -802,13 +818,13 @@ class Compiler(object):
                     try: del backrefs[offset]
                     except: pass
                 elif offset in backrefs:
-                    # we can merge changes[target] and changes[i] if:
+                    # we can merge node[target] and node[i] if:
                     # - no operation has changed cell k between them. (thus such target
                     #   is backrefs[offset], as it is updated after change)
                     # - no operation has referenced cell k between them. it includes
-                    #   changes[target] which is self-reference (like a = a + 4).
+                    #   node[target] which is self-reference (like a = a + 4).
                     # - no operation has changed cell k' which is referenced by v.
-                    #   it includes changes[target] too, if v references targetous k.
+                    #   it includes node[target] too, if v references target k.
                     target = backrefs[offset]
                     if target > usedrefs.get(offset, -1) and \
                             all(target > backrefs.get(ioffset, -1) for ioffset in refs):
