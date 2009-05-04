@@ -764,6 +764,45 @@ class If(ComplexNode):
     def __repr__(self):
         return 'If[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
 
+class Repeat(ComplexNode):
+    def __init__(self, count, children=[]):
+        ComplexNode.__init__(self, children)
+        self.count = Expr(count)
+
+    def __nonzero__(self):
+        return bool(self.count) and len(self) > 0
+
+    def movepointer(self, offset):
+        ComplexNode.movepointer(self, offset)
+        self.count = self.count.movepointer(offset)
+
+    def withmemory(self, map):
+        self.count = self.count.withmemory(map)
+
+    def offsets(self):
+        if ComplexNode.offsets(self) == 0:
+            return 0
+        else:
+            return None
+
+    def references(self):
+        return ComplexNode.references(self) | self.count.references()
+
+    def updates(self):
+        return ComplexNode.updates(self)
+
+    def emit(self, emitter):
+        var = emitter.newvariable('loopcnt')
+        emitter.write('for (%s = %s; %s > 0; --%s) {' % (var, self.count, var, var))
+        emitter.indent()
+        for child in self:
+            child.emit(emitter)
+        emitter.dedent()
+        emitter.write('}')
+
+    def __repr__(self):
+        return 'Repeat[%r; %s]' % (self.count, ComplexNode.__repr__(self)[1:-1])
+
 class While(ComplexNode):
     def __init__(self, cond=None, children=[]):
         ComplexNode.__init__(self, children)
@@ -818,6 +857,15 @@ class While(ComplexNode):
 class Emitter(object):
     def __init__(self):
         self.nindents = 0
+        self.nextvars = {} 
+
+    def newvariable(self, prefix):
+        index = self.nextvars.get(prefix, 0)
+        self.nextvars[prefix] = index + 1
+
+        name = prefix + str(index)
+        self.write('int %s;' % name)
+        return name
 
     def write(self, line):
         print '\t' * self.nindents + line
@@ -885,7 +933,8 @@ class Compiler(object):
         return node
 
     # general node cleanup routine. it does the following jobs:
-    # - removes every no-op nodes.
+    # - removes every no-op nodes, including If[False; ...] and k+=0.
+    # - flattens Repeat[num; ...] node with all memory ops to parent.
     # - flattens If[True; ...] node to parent.
     # - merges MovePointer[] nodes as much as possible, and adjusts
     #   other nodes accordingly.
@@ -898,25 +947,60 @@ class Compiler(object):
         for i, cur, replace in node.transforming():
             if not cur: # remove no-op
                 replace()
-            elif isinstance(cur, MovePointer):
+                continue
+            if isinstance(cur, MovePointer):
                 offset += cur.offset
                 replace()
-            else:
-                result = []
-                if cur.canmovepointer(offset):
-                    cur.movepointer(offset)
-                else:
-                    # movepointer failed, flush current MovePointer node before it
-                    if offset != 0: result.append(MovePointer(offset))
-                    offset = 0
-                result.append(self.optimize_cleanup(cur))
-                replace(*result)
+                continue
 
-                # if this command doesn't return, ignore all nodes after it.
-                if not result[-1].returns():
-                    del node[i+len(result):]
-                    offset = 0
-                    break
+            result = []
+            if cur.canmovepointer(offset):
+                cur.movepointer(offset)
+            else:
+                # movepointer failed, flush current MovePointer node before it
+                if offset != 0: result.append(MovePointer(offset))
+                offset = 0
+
+            cur = self.optimize_cleanup(cur)
+            processed = False
+
+            if isinstance(cur, If):
+                if isinstance(cur.cond, Always):
+                    result.extend(cur)
+                    processed = True
+
+            elif isinstance(cur, Repeat):
+                hasset = False
+                for inode in cur:
+                    if isinstance(inode, SetMemory):
+                        if not inode.value.simple(): break
+                        hasset = True
+                    elif isinstance(inode, AdjustMemory):
+                        if not inode.delta.simple(): break
+                    else:
+                        break
+
+                else:
+                    inodes = []
+                    for inode in cur:
+                        if isinstance(inode, AdjustMemory):
+                            inode.delta *= cur.count
+                    if hasset:
+                        # cannot flatten, but we can turn it into If[]
+                        cond = ExprNotEqual(cur.count, 0)
+                        result.append(If(cond, cur[:]))
+                    else:
+                        result.extend(cur)
+                    processed = True
+
+            if not processed:
+                result.append(cur)
+            replace(*result)
+
+            # if this command doesn't return, ignore all nodes after it.
+            if not result[-1].returns():
+                del node[i+len(result):]
+                return node
 
         if offset != 0:
             node.append(MovePointer(offset))
@@ -949,13 +1033,14 @@ class Compiler(object):
             del node[-1]
         return node
 
-    # tries to optimize simple loops:
-    # - While[p[x]!=v; ...] with offsets=0, no I/O nor complex memory ops,
-    #   and adjust cell 0 by const amount within it.
-    # - While[p[x]!=v; ...] with offsets=0, sets cell 0 to zero within it.
+    # tries to convert various loops into more specific form:
+    # - While[p[x]!=v; ...] with offsets=0, which adjusts cell 0 by const amount.
+    #   this node will be replaced by Repeat[numrepeat; ...]
+    # - While[p[x]!=v; ...] with offsets=0, which sets cell 0 to zero.
+    #   this node will be replaced by If[p[x]!=v; ...].
     #
-    # this pass is for optimizing very common cases, like multiplication loops.
-    # moreloop pass will turn other cases into for loops.
+    # this pass doesn't optimize converted loop forms. cleanup pass will do it,
+    # as it is a natural place to perform many smallish optimizations.
     def optimize_simpleloop(self, node):
         if not isinstance(node, ComplexNode):
             return node
@@ -969,47 +1054,40 @@ class Compiler(object):
                 target = cur.cond.target
                 value = cur.cond.value
 
-                # check constraints.
-                cell = 0
+                convertable = 2 # 0:impossible, 1:only conditional, 2:possible
+                cell = Expr()
                 cellset = None
                 tobeignored = None
-                mergable = True # may we merge the loop into parent?
-                complex = False # complex loop is ignored unless it's conditional.
-                multiplier = None
 
                 for inode in cur:
                     if isinstance(inode, AdjustMemory):
-                        if not inode.delta.simple():
-                            complex = True
                         if inode.offset == target:
                             cell += inode.delta
                             tobeignored = inode
-                    elif not isinstance(inode, Nop):
-                        mergable = False
-                        if isinstance(inode, SetMemory):
-                            if not inode.value.simple():
-                                complex = True
-                            if inode.offset == target:
-                                cell = inode.value
-                                cellset = True
-                                tobeignored = inode
-                        else:
-                            if not inode.pure():
-                                complex = True
-                            if isinstance(inode, ComplexNode):
-                                break
+                    elif isinstance(inode, SetMemory):
+                        if inode.offset == target:
+                            cell = inode.value
+                            cellset = True
+                            tobeignored = inode
+                    else:
+                        updates = inode.updates()
+                        if None in updates or target in updates:
+                            convertable = 0
+                            break
 
-                else:
+                    refs = inode.references() - inode.updates()
+                    if None in refs or target in refs:
+                        convertable = 1 # references target, cannot use Repeat[]
+
+                if convertable and cell.simple():
                     delta = (value - int(cell)) % overflow
                     if cellset:
                         if delta == 0:
-                            multiplier = 1
-                            template = [If(cur.cond)]
-                            result = template[0]
+                            replace(If(cur.cond, cur[:]))
                         else:
                             replace(While(Always()))
-                            continue
-                    elif not complex:
+                        continue
+                    elif convertable > 1:
                         # let w be the overflow value, which is 256 for char etc.
                         # then there are three cases in the following code:
                         #     i = 0; for (j = 0; i != x; ++j) i += m;
@@ -1026,30 +1104,20 @@ class Compiler(object):
                             replace(While(Always()))
                             continue
 
-                        diff = Expr[target] - value
-
                         u, v, gcd = _gcdex(delta, overflow)
-                        multiplier = (u % overflow) * (diff // gcd)
+                        diff = Expr[target] - value
+                        count = (u % overflow) * (diff // gcd)
 
-                        if mergable:
-                            template = []
-                            result = template
+                        inodes = [inode for inode in cur if inode is not tobeignored]
+                        if gcd == 1:
+                            # no need to check if x is a multiple of gcd(m,w) (=1).
+                            replace(Repeat(count, inodes),
+                                    SetMemory(target, value))
                         else:
-                            template = [If(cur.cond)]
-                            result = template[0]
-                        if gcd != 1:
-                            template.insert(0,
-                                    If(ExprNotEqual(diff % gcd, 0), [While(Always())]))
-
-                if multiplier is not None:
-                    for inode in cur:
-                        if inode is tobeignored: continue
-                        if isinstance(inode, AdjustMemory):
-                            inode.delta *= multiplier
-                        result.append(inode)
-                    template.append(SetMemory(target, value))
-                    replace(*template)
-                    continue
+                            replace(If(ExprNotEqual(diff % gcd, 0), [While(Always())]),
+                                    Repeat(count, inodes),
+                                    SetMemory(target, value))
+                        continue # XXX should be reoptimized
 
             if isinstance(cur, ComplexNode):
                 replace(self.optimize_simpleloop(cur))
