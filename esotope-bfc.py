@@ -752,6 +752,7 @@ class If(ComplexNode):
         return ComplexNode.updates(self)
 
     def emit(self, emitter):
+        emitter.debuginfo(self)
         emitter.write('if (%s) {' % self.cond)
         emitter.indent()
         for child in self:
@@ -790,8 +791,13 @@ class Repeat(ComplexNode):
         return ComplexNode.updates(self)
 
     def emit(self, emitter):
+        if self.count.code[-1] is _EXPRREF: # TODO more generic code
+            count = self.count # since the memory cell is already within the range.
+        else:
+            count = self.count % emitter.overflow
+
         var = emitter.newvariable('loopcnt')
-        count = self.count % emitter.overflow
+        emitter.debuginfo(self)
         emitter.write('for (%s = %s; %s > 0; --%s) {' % (var, count, var, var))
         emitter.indent()
         for child in self:
@@ -839,6 +845,7 @@ class While(ComplexNode):
         return not isinstance(self.cond, Always)
 
     def emit(self, emitter):
+        emitter.debuginfo(self)
         if isinstance(self.cond, Always) and len(self) == 0:
             emitter.write('while (1); /* infinite loop */')
         else:
@@ -854,8 +861,10 @@ class While(ComplexNode):
 
 
 class Emitter(object):
-    def __init__(self, compiler):
+    def __init__(self, compiler, debugging=False):
         self.compiler = compiler
+        self.debugging = debugging
+
         self.nindents = 0
         self.nextvars = {} 
 
@@ -869,6 +878,18 @@ class Emitter(object):
         name = prefix + str(index)
         self.write('int %s;' % name)
         return name
+
+    def debuginfo(self, node):
+        if not self.debugging: return
+
+        updates = node.updates()
+        updatesmore = None in updates
+        updates.discard(None)
+        updates = ' '.join(map(str, sorted(updates)))
+        if updatesmore:
+            self.write('// clobbers: %s (and possibly more)' % updates)
+        elif updates:
+            self.write('// clobbers: %s' % updates)
 
     def write(self, line):
         print '\t' * self.nindents + line
@@ -1074,9 +1095,12 @@ class Compiler(object):
                 replace(SeekMemory(cur[0].offset, value))
                 continue
 
+            if cur.offsets() != 0: continue
+
             convertible = 2 # 0:impossible, 1:only conditional, 2:possible
             cell = Expr()
             cellset = None
+            cellunknown = False
             tobeignored = None
 
             for inode in cur:
@@ -1087,28 +1111,34 @@ class Compiler(object):
                     if inode.offset == target:
                         cell = inode.value
                         cellset = True
-                elif inode.offsets() != 0:
-                    convertible = 0
-                    break
+                        cellunknown = False
                 else:
+                    if inode.offsets() != 0:
+                        convertible = 1
+
                     updates = inode.updates()
                     if None in updates or target in updates:
-                        convertible = 0
-                        break
+                        convertible = 1
+                        cellunknown = True
 
                 refs = inode.references() - inode.updates()
                 if None in refs or target in refs:
                     convertible = 1 # references target, cannot use Repeat[]
 
             if not convertible: continue
-            if not cell.simple(): continue
+            if cellunknown or not cell.simple(): continue
             delta = (value - int(cell)) % overflow
 
             if cellset:
                 if delta == 0:
-                    replace(If(cur.cond, cur[:]))
+                    # XXX SetMemory is added temporarily; we should implement
+                    # SSA-based optimizer and it will recognize them across basic blocks
+                    replace(If(cur.cond, cur[:]), SetMemory(target, value))
                 else:
-                    replace(While(Always()))
+                    infloop = While(Always())
+                    if not cur.pure(): # e.g. +[.[-]+]
+                        infloop.extend(cur)
+                    replace(infloop)
 
             elif convertible > 1:
                 # let w be the overflow value, which is 256 for char etc.
@@ -1123,6 +1153,7 @@ class Compiler(object):
                 #
                 # we can calculate u and gcd(m,w) in the compile time, but
                 # x is not (yet). so we shall add simple check for now.
+
                 if delta == 0:
                     replace(While(Always()))
                     continue
@@ -1280,8 +1311,8 @@ class Compiler(object):
         node[:] = inodes
         return node
 
-    def emit(self, node):
-        node.emit(Emitter(self))
+    def emit(self, node, debugging=False):
+        node.emit(Emitter(self, debugging))
 
 def main(argv):
     if len(argv) < 2:
