@@ -454,7 +454,7 @@ class Node(object):
     def returns(self): return True
 
 class ComplexNode(Node, list):
-    def __nonzero__(self):
+    def empty(self):
         return len(self) > 0
 
     def canmovepointer(self, offset):
@@ -469,15 +469,15 @@ class ComplexNode(Node, list):
     def pure(self):
         return all(child.pure() for child in self)
 
-    def offsets(self):
-        offsets = 0
+    def stride(self):
+        stride = 0
         for child in self:
             ioffsets = child.offsets()
             if ioffsets is None: return None
-            offsets += ioffsets
-        return offsets
+            stride += ioffsets
+        return stride
 
-    def references(self):
+    def bodyreferences(self):
         offsets = 0
         refs = []
         for child in self:
@@ -486,12 +486,14 @@ class ComplexNode(Node, list):
                 # invalidates prior updates, but not later nor current.
                 offsets = 0
                 refs = [None]
+            else:
+                offsets += ioffsets
             refs.extend(i if i is None else i + offsets for i in child.references())
 
         # should return memory references relative to final pointer.
         return set(i if i is None else i - offsets for i in refs)
 
-    def updates(self):
+    def bodyupdates(self):
         offsets = 0
         updates = []
         for child in self:
@@ -499,6 +501,8 @@ class ComplexNode(Node, list):
             if ioffsets is None:
                 offsets = 0
                 updates = [None]
+            else:
+                offsets += ioffsets
             updates.extend(i if i is None else i + offsets for i in child.updates())
 
         return set(i if i is None else i - offsets for i in updates)
@@ -740,19 +744,21 @@ class If(ComplexNode):
         self.cond = self.cond.withmemory(map)
 
     def offsets(self):
-        if ComplexNode.offsets(self) == 0:
+        if self.stride() == 0:
             return 0
         else:
             return None
 
     def references(self):
-        return ComplexNode.references(self) | self.cond.references()
+        return self.bodyreferences() | self.cond.references()
 
     def updates(self):
-        return ComplexNode.updates(self)
+        return self.bodyupdates()
 
     def emit(self, emitter):
-        emitter.debuginfo(self)
+        if emitter.debugging:
+            emitter.dumpcomplex(self)
+
         emitter.write('if (%s) {' % self.cond)
         emitter.indent()
         for child in self:
@@ -779,16 +785,22 @@ class Repeat(ComplexNode):
         self.count = self.count.withmemory(map)
 
     def offsets(self):
-        if ComplexNode.offsets(self) == 0:
+        if self.stride() == 0:
             return 0
         else:
             return None
 
     def references(self):
-        return ComplexNode.references(self) | self.count.references()
+        bodyrefs = self.bodyreferences()
+        if bodyrefs and self.stride() != 0:
+            bodyrefs.add(None)
+        return bodyrefs | self.count.references()
 
     def updates(self):
-        return ComplexNode.updates(self)
+        bodyupdates = self.bodyupdates()
+        if bodyupdates and self.stride() != 0:
+            bodyupdates.add(None)
+        return bodyupdates
 
     def emit(self, emitter):
         if self.count.code[-1] is _EXPRREF: # TODO more generic code
@@ -796,8 +808,10 @@ class Repeat(ComplexNode):
         else:
             count = self.count % emitter.overflow
 
+        if emitter.debugging:
+            emitter.dumpcomplex(self)
+
         var = emitter.newvariable('loopcnt')
-        emitter.debuginfo(self)
         emitter.write('for (%s = %s; %s > 0; --%s) {' % (var, count, var, var))
         emitter.indent()
         for child in self:
@@ -830,22 +844,30 @@ class While(ComplexNode):
         if isinstance(newcond, Never): self.cond = newcond
 
     def offsets(self):
-        if ComplexNode.offsets(self) == 0:
+        if self.stride() == 0:
             return 0
         else:
             return None
 
     def references(self):
-        return ComplexNode.references(self) | self.cond.references()
+        bodyrefs = self.bodyreferences()
+        if bodyrefs and self.stride() != 0:
+            bodyrefs.add(None)
+        return bodyrefs | self.cond.references()
 
     def updates(self):
-        return ComplexNode.updates(self)
+        bodyupdates = self.bodyupdates()
+        if bodyupdates and self.stride() != 0:
+            bodyupdates.add(None)
+        return bodyupdates
 
     def returns(self):
         return not isinstance(self.cond, Always)
 
     def emit(self, emitter):
-        emitter.debuginfo(self)
+        if emitter.debugging:
+            emitter.dumpcomplex(self)
+
         if isinstance(self.cond, Always) and len(self) == 0:
             emitter.write('while (1); /* infinite loop */')
         else:
@@ -879,8 +901,12 @@ class Emitter(object):
         self.write('int %s;' % name)
         return name
 
-    def debuginfo(self, node):
-        if not self.debugging: return
+    def dumpcomplex(self, node):
+        stride = node.stride()
+        if stride is None:
+            self.write('// stride: unknown')
+        elif stride != 0:
+            self.write('// stride: %s' % stride)
 
         updates = node.updates()
         updatesmore = None in updates
