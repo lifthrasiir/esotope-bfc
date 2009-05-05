@@ -700,28 +700,26 @@ class OutputConst(Node):
     def __repr__(self):
         return 'OutputConst[%r]' % self.str
 
-# seek memory cell offset, offset+stride, offset+2*stride, ...
 class SeekMemory(Node):
-    def __init__(self, offset, stride, value=0):
-        self.offset = offset
+    def __init__(self, stride, value=0):
         self.stride = stride
         self.value = value
+
+    def offsets(self):
+        return None
 
     def canmovepointer(self, offset):
         return True
 
     def movepointer(self, offset):
-        self.offset += offset
+        pass
 
     def emit(self, emitter):
-        initstmt = _formatadjust('p', self.offset)
         accumstmt = _formatadjust('p', self.stride)
+        emitter.write('while (*p != %s) %s;' % (self.value, accumstmt))
 
-        if initstmt:
-            emitter.write('for (%s; *p != %s; %s);' %
-                    (initstmt, self.value, accumstmt))
-        else:
-            emitter.write('while (*p != %s) %s;' % (self.value, accumstmt))
+    def __repr__(self):
+        return 'SeekMemory[p[%r*k]!=%r]' % (self.stride, self.value)
 
 class If(ComplexNode):
     def __init__(self, cond=None, children=[]):
@@ -793,7 +791,8 @@ class Repeat(ComplexNode):
 
     def emit(self, emitter):
         var = emitter.newvariable('loopcnt')
-        emitter.write('for (%s = %s; %s > 0; --%s) {' % (var, self.count, var, var))
+        count = self.count % emitter.overflow
+        emitter.write('for (%s = %s; %s > 0; --%s) {' % (var, count, var, var))
         emitter.indent()
         for child in self:
             child.emit(emitter)
@@ -855,9 +854,13 @@ class While(ComplexNode):
 
 
 class Emitter(object):
-    def __init__(self):
+    def __init__(self, compiler):
+        self.compiler = compiler
         self.nindents = 0
         self.nextvars = {} 
+
+    def __getattr__(self, name):
+        return getattr(self.compiler, name)
 
     def newvariable(self, prefix):
         index = self.nextvars.get(prefix, 0)
@@ -877,6 +880,9 @@ class Emitter(object):
         self.nindents -= 1
 
 class Compiler(object):
+    def __init__(self, overflow=256):
+        self.overflow = overflow
+
     def parse(self, fp):
         nodestack = [Program()]
 
@@ -921,14 +927,11 @@ class Compiler(object):
 
     def optimize(self, node):
         node = self.optimize_simpleloop(node)
-        node = self.optimize_cleanup(node)
         node = self.optimize_onceuponatime(node)
         node = self.optimize_propagate(node)
         node = self.optimize_simpleloop(node)
         node = self.optimize_moreloop(node)
-        node = self.optimize_convarray(node)
         node = self.optimize_propagate(node)
-        node = self.optimize_cleanup(node)
         node = self.optimize_stdlib(node)
         return node
 
@@ -939,29 +942,39 @@ class Compiler(object):
     # - merges MovePointer[] nodes as much as possible, and adjusts
     #   other nodes accordingly.
     # - removes every (dead) nodes after non-returning node.
-    def optimize_cleanup(self, node):
+    #
+    # this is not recursive, and intended to be called in the end of other
+    # optimization passes.
+    def cleanup(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
-        offset = 0
+        offsets = 0
         for i, cur, replace in node.transforming():
             if not cur: # remove no-op
                 replace()
                 continue
-            if isinstance(cur, MovePointer):
-                offset += cur.offset
-                replace()
-                continue
 
             result = []
-            if cur.canmovepointer(offset):
-                cur.movepointer(offset)
+
+            ioffsets = cur.offsets()
+            if ioffsets is None:
+                if offsets != 0: result.append(MovePointer(offsets))
+                offsets = 0
+            else:
+                offsets += ioffsets
+
+            if isinstance(cur, MovePointer):
+                replace(*result)
+                continue
+
+            if cur.canmovepointer(offsets):
+                cur.movepointer(offsets)
             else:
                 # movepointer failed, flush current MovePointer node before it
-                if offset != 0: result.append(MovePointer(offset))
-                offset = 0
+                if offsets != 0: result.append(MovePointer(offsets))
+                offsets = 0
 
-            cur = self.optimize_cleanup(cur)
             processed = False
 
             if isinstance(cur, If):
@@ -1002,8 +1015,8 @@ class Compiler(object):
                 del node[i+len(result):]
                 return node
 
-        if offset != 0:
-            node.append(MovePointer(offset))
+        if offsets != 0:
+            node.append(MovePointer(offsets))
 
         return node
 
@@ -1038,91 +1051,102 @@ class Compiler(object):
     #   this node will be replaced by Repeat[numrepeat; ...]
     # - While[p[x]!=v; ...] with offsets=0, which sets cell 0 to zero.
     #   this node will be replaced by If[p[x]!=v; ...].
-    #
-    # this pass doesn't optimize converted loop forms. cleanup pass will do it,
-    # as it is a natural place to perform many smallish optimizations.
+    # - While[p[0]!=v; MovePointer[y]], where y is const.
+    #   this nodes will be replaced by SeekMemory[p[y*k]!=v].
     def optimize_simpleloop(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
-        overflow = 256 # XXX hard-coded
+        overflow = self.overflow
 
-        inodes = []
+        for i in xrange(len(node)):
+            if isinstance(node[i], ComplexNode):
+                node[i] = self.optimize_simpleloop(node[i])
+
         for i, cur, replace in node.transforming():
-            if isinstance(cur, While) and isinstance(cur.cond, MemNotEqual) and \
-                    cur.offsets() == 0:
-                target = cur.cond.target
-                value = cur.cond.value
+            if not isinstance(cur, While): continue
+            if not isinstance(cur.cond, MemNotEqual): continue
 
-                convertable = 2 # 0:impossible, 1:only conditional, 2:possible
-                cell = Expr()
-                cellset = None
-                tobeignored = None
+            target = cur.cond.target
+            value = cur.cond.value
 
-                for inode in cur:
-                    if isinstance(inode, AdjustMemory):
-                        if inode.offset == target:
-                            cell += inode.delta
-                            tobeignored = inode
-                    elif isinstance(inode, SetMemory):
-                        if inode.offset == target:
-                            cell = inode.value
-                            cellset = True
-                            tobeignored = inode
-                    else:
-                        updates = inode.updates()
-                        if None in updates or target in updates:
-                            convertable = 0
-                            break
+            if target == 0 and len(cur) == 1 and isinstance(cur[0], MovePointer):
+                replace(SeekMemory(cur[0].offset, value))
+                continue
 
-                    refs = inode.references() - inode.updates()
-                    if None in refs or target in refs:
-                        convertable = 1 # references target, cannot use Repeat[]
+            convertible = 2 # 0:impossible, 1:only conditional, 2:possible
+            cell = Expr()
+            cellset = None
+            tobeignored = None
 
-                if convertable and cell.simple():
-                    delta = (value - int(cell)) % overflow
-                    if cellset:
-                        if delta == 0:
-                            replace(If(cur.cond, cur[:]))
-                        else:
-                            replace(While(Always()))
-                        continue
-                    elif convertable > 1:
-                        # let w be the overflow value, which is 256 for char etc.
-                        # then there are three cases in the following code:
-                        #     i = 0; for (j = 0; i != x; ++j) i += m;
-                        #
-                        # 1. if m = 0, it loops forever.
-                        # 2. otherwise, the condition j * m = x (mod w) must hold.
-                        #    let u * m + v * w = gcd(m,w), and
-                        #    1) if x is not a multiple of gcd(m,w), it loops forever.
-                        #    2) otherwise it terminates and j = u * (x / gcd(m,w)).
-                        #
-                        # we can calculate u and gcd(m,w) in the compile time, but
-                        # x is not (yet). so we shall add simple check for now.
-                        if delta == 0:
-                            replace(While(Always()))
-                            continue
+            for inode in cur:
+                if isinstance(inode, AdjustMemory):
+                    if inode.offset == target:
+                        cell += inode.delta
+                elif isinstance(inode, SetMemory):
+                    if inode.offset == target:
+                        cell = inode.value
+                        cellset = True
+                elif inode.offsets() != 0:
+                    convertible = 0
+                    break
+                else:
+                    updates = inode.updates()
+                    if None in updates or target in updates:
+                        convertible = 0
+                        break
 
-                        u, v, gcd = _gcdex(delta, overflow)
-                        diff = Expr[target] - value
-                        count = (u % overflow) * (diff // gcd)
+                refs = inode.references() - inode.updates()
+                if None in refs or target in refs:
+                    convertible = 1 # references target, cannot use Repeat[]
 
-                        inodes = [inode for inode in cur if inode is not tobeignored]
-                        if gcd == 1:
-                            # no need to check if x is a multiple of gcd(m,w) (=1).
-                            replace(Repeat(count, inodes),
-                                    SetMemory(target, value))
-                        else:
-                            replace(If(ExprNotEqual(diff % gcd, 0), [While(Always())]),
-                                    Repeat(count, inodes),
-                                    SetMemory(target, value))
-                        continue # XXX should be reoptimized
+            if not convertible: continue
+            if not cell.simple(): continue
+            delta = (value - int(cell)) % overflow
 
-            if isinstance(cur, ComplexNode):
-                replace(self.optimize_simpleloop(cur))
+            if cellset:
+                if delta == 0:
+                    replace(If(cur.cond, cur[:]))
+                else:
+                    replace(While(Always()))
 
-        return node
+            elif convertible > 1:
+                # let w be the overflow value, which is 256 for char etc.
+                # then there are three cases in the following code:
+                #     i = 0; for (j = 0; i != x; ++j) i += m;
+                #
+                # 1. if m = 0, it loops forever.
+                # 2. otherwise, the condition j * m = x (mod w) must hold.
+                #    let u * m + v * w = gcd(m,w), and
+                #    1) if x is not a multiple of gcd(m,w), it loops forever.
+                #    2) otherwise it terminates and j = u * (x / gcd(m,w)).
+                #
+                # we can calculate u and gcd(m,w) in the compile time, but
+                # x is not (yet). so we shall add simple check for now.
+                if delta == 0:
+                    replace(While(Always()))
+                    continue
+
+                u, v, gcd = _gcdex(delta, overflow)
+                diff = Expr[target] - value
+                count = (u % overflow) * (diff // gcd)
+
+                inodes = [inode for inode in cur
+                          if not (isinstance(inode, (SetMemory, AdjustMemory)) and
+                                  inode.offset == target)]
+
+                result = []
+                if gcd > 1: 
+                    # no need to check if x is a multiple of gcd(m,w) (=1).
+                    result.append(If(ExprNotEqual(diff % gcd, 0),
+                                     [While(Always())]))
+                if inodes:
+                    # don't emit Repeat[] if [-] or [+] is given.
+                    result.append(Repeat(count, inodes))
+                result.append(SetMemory(target, value))
+                replace(*result)
+
+        return self.cleanup(node)
 
     # extensive loop optimization. it calculates repeat count if possible and
     # tries to convert them into For[].
@@ -1181,6 +1205,8 @@ class Compiler(object):
                 substs.clear()
                 if isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual):
                     substs[cur.cond.target] = cur.cond.value
+                elif isinstance(cur, SeekMemory):
+                    substs[0] = cur.value
 
             refs = cur.references()
             merged = False
@@ -1221,28 +1247,10 @@ class Compiler(object):
             for ioffset in refs:
                 usedrefs[ioffset] = target
 
-        return node
+        return self.cleanup(node)
 
     # converts array operations to special node for later use.
     def optimize_convarray(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
-        for i, cur, replace in node.transforming():
-            # recognize >>[<<] or similar.
-            if isinstance(cur, While) and \
-                    isinstance(cur.cond, MemNotEqual) and cur.cond.target == 0 and \
-                    len(cur) == 1 and isinstance(cur[0], MovePointer):
-                offset = 0
-                stride = cur[0].offset
-                if i > 0 and isinstance(node[i-1], MovePointer):
-                    offset = node[i-1].offset
-                    node[i-1] = Nop()
-                replace(SeekMemory(offset, stride, cur.cond.value))
-
-            elif isinstance(cur, ComplexNode):
-                replace(self.optimize_convarray(cur))
-
         return node
 
     # converts common idioms to direct C library call.
@@ -1272,6 +1280,9 @@ class Compiler(object):
         node[:] = inodes
         return node
 
+    def emit(self, node):
+        node.emit(Emitter(self))
+
 def main(argv):
     if len(argv) < 2:
         print >>sys.stderr, 'Usage: %s filename' % argv[0]
@@ -1285,7 +1296,7 @@ def main(argv):
     compiler = Compiler()
     node = compiler.parse(fp)
     node = compiler.optimize(node)
-    node.emit(Emitter())
+    compiler.emit(node)
     return 0
 
 if __name__ == '__main__':
