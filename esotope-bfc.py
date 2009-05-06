@@ -27,7 +27,7 @@ def _formatadjust(ref, value):
 
 _reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
 _reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
-_reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
+_reprmap[34] = '\\"'; _reprmap[37] = '%%'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
 def _addslashes(s):
     return ''.join(_reprmap[ord(i)] for i in s)
 
@@ -725,6 +725,9 @@ class SeekMemory(Node):
     def reloffsets(self):
         return 0 # SeekMemory cannot affect relative pointer
 
+    def references(self):
+        return set([self.target, None])
+
     def emit(self, emitter):
         accumstmt = _formatadjust('p', self.stride)
         emitter.write('while (p[%d] != %s) %s;' % (self.target, self.value, accumstmt))
@@ -1088,8 +1091,8 @@ class Compiler(object):
 
         return node
 
-    # change first AdjustMemory nodes to SetMemory in the very first of program.
-    # also removes the last (redundant) MovePointer if any.
+    # adds redundant SetMemory nodes for later passes. other passes don't know
+    # about initial memory contents, so it has to add such information explicitly.
     def optimize_onceuponatime(self, node):
         if not isinstance(node, Program):
             return node
@@ -1097,21 +1100,20 @@ class Compiler(object):
         offsets = 0
         changed = set()
         for i, cur, replace in node.transforming():
-            if isinstance(cur, AdjustMemory) and \
-                    cur.offset + offsets not in changed:
-                replace(SetMemory(cur.offset, cur.delta))
-            elif isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual) and \
-                    cur.cond.target + offsets not in changed:
-                replace() # while(0) { ... } etc.
-
             ioffsets = cur.offsets()
             if ioffsets is None: break
             offsets += ioffsets
 
-            changed.update(j + offsets for j in cur.updates() if j is not None)
+            refs = [j + offsets for j in cur.references() if j is not None]
+            updates = [j + offsets for j in cur.updates() if j is not None]
 
-        while len(node) > 0 and isinstance(node[-1], MovePointer):
-            del node[-1]
+            zerorefs = set(refs) - changed
+            if zerorefs:
+                replace(*([SetMemory(j - offsets, 0) for j in zerorefs] + [cur]))
+                changed.update(zerorefs)
+
+            changed.update(updates)
+
         return node
 
     # tries to convert various loops into more specific form:
