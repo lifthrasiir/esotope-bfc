@@ -453,6 +453,8 @@ class Node(object):
     def updates(self): return set()
     def returns(self): return True
 
+    def reloffsets(self): return self.offsets()
+
 class ComplexNode(Node, list):
     def empty(self):
         return len(self) > 0
@@ -706,7 +708,8 @@ class OutputConst(Node):
         return 'OutputConst[%r]' % self.str
 
 class SeekMemory(Node):
-    def __init__(self, stride, value=0):
+    def __init__(self, target, stride, value=0):
+        self.target = target
         self.stride = stride
         self.value = value
 
@@ -717,14 +720,21 @@ class SeekMemory(Node):
         return True
 
     def movepointer(self, offset):
-        pass
+        self.target += offset
+
+    def reloffsets(self):
+        return 0 # SeekMemory cannot affect relative pointer
 
     def emit(self, emitter):
         accumstmt = _formatadjust('p', self.stride)
-        emitter.write('while (*p != %s) %s;' % (self.value, accumstmt))
+        emitter.write('while (p[%d] != %s) %s;' % (self.target, self.value, accumstmt))
 
     def __repr__(self):
-        return 'SeekMemory[p[%r*k]!=%r]' % (self.stride, self.value)
+        if self.target == 0:
+            return 'SeekMemory[p[%r*k]!=%r]' % (self.stride, self.value)
+        else:
+            return 'SeekMemory[p[%d+%r*k]!=%r] @%d' % \
+                    (self.target, self.stride, self.value, self.target)
 
 class If(ComplexNode):
     def __init__(self, cond=None, children=[]):
@@ -835,6 +845,11 @@ class While(ComplexNode):
         # infinite loop should return True, even if there are no children.
         return bool(self.cond)
 
+    def canmovepointer(self, offset):
+        if offset == 0: return True
+        if self.stride() is None: return False
+        return all(child.canmovepointer(offset) for child in self)
+
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
         self.cond = self.cond.movepointer(offset)
@@ -849,6 +864,11 @@ class While(ComplexNode):
             return 0
         else:
             return None
+
+    def reloffsets(self):
+        if self.stride() is None:
+            return None
+        return 0
 
     def references(self):
         bodyrefs = self.bodyreferences()
@@ -1005,7 +1025,14 @@ class Compiler(object):
 
             result = []
 
-            ioffsets = cur.offsets()
+            if cur.canmovepointer(offsets):
+                cur.movepointer(offsets)
+            else:
+                # movepointer failed, flush current MovePointer node before it
+                if offsets != 0: result.append(MovePointer(offsets))
+                offsets = 0
+
+            ioffsets = cur.reloffsets()
             if ioffsets is None:
                 if offsets != 0: result.append(MovePointer(offsets))
                 offsets = 0
@@ -1015,13 +1042,6 @@ class Compiler(object):
             if isinstance(cur, MovePointer):
                 replace(*result)
                 continue
-
-            if cur.canmovepointer(offsets):
-                cur.movepointer(offsets)
-            else:
-                # movepointer failed, flush current MovePointer node before it
-                if offsets != 0: result.append(MovePointer(offsets))
-                offsets = 0
 
             processed = False
 
@@ -1119,7 +1139,7 @@ class Compiler(object):
             value = cur.cond.value
 
             if target == 0 and len(cur) == 1 and isinstance(cur[0], MovePointer):
-                replace(SeekMemory(cur[0].offset, value))
+                replace(SeekMemory(0, cur[0].offset, value))
                 continue
 
             if cur.offsets() != 0: continue
@@ -1264,7 +1284,7 @@ class Compiler(object):
                 if isinstance(cur, (While, If)) and isinstance(cur.cond, MemNotEqual):
                     substs[cur.cond.target] = cur.cond.value
                 elif isinstance(cur, SeekMemory):
-                    substs[0] = cur.value
+                    substs[cur.target] = cur.value
 
             refs = cur.references()
             merged = False
@@ -1307,7 +1327,7 @@ class Compiler(object):
 
         return self.cleanup(node)
 
-    # converts array operations to special node for later use.
+    # XXX proper name
     def optimize_convarray(self, node):
         return node
 
