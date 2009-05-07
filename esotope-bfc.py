@@ -9,6 +9,11 @@ try: import psyco; psyco.full()
 except ImportError: pass
 
 
+def _setmovepointer(cells, offset):
+    result = [i + offset for i in cells if i is not None]
+    if None in cells: result.append(None)
+    return set(result)
+
 def _formatadjust(ref, value):
     if isinstance(value, (int, long)) or value.simple():
         value = int(value)
@@ -27,7 +32,7 @@ def _formatadjust(ref, value):
 
 _reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
 _reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
-_reprmap[34] = '\\"'; _reprmap[37] = '%%'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
+_reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
 def _addslashes(s):
     return ''.join(_reprmap[ord(i)] for i in s)
 
@@ -431,29 +436,26 @@ class Node(object):
     # propagates known memory cells given.
     def withmemory(self, map): pass
 
-    # specifies what this node does. optimizer assumes it does:
-    #
-    # - changes the pointer by node.offsets().
-    #   node.offsets() can return Expr object, or None if uncertain.
-    #
-    # - references some or all memory cells in node.references().
-    #   memory offsets here are relative to the final pointer, after
-    #   changed by node.offsets(). if it may reference other cells unspecified
-    #   it should contain None.
-    #
-    # - updates some or all memory cells in node.updates().
-    #   this is similar to node.references(). in reality it behaves like
-    #   "clobber" list, as even no memory cells have to be updated.
-    #
-    # - will run forever if node.returns() is False.
-    #   there could be an infinite loop with node.returns() = True, though.
+    # a set of offset to memory cells which may be referenced/updated by
+    # this node, relative to initial pointer before execution.
+    # if there are more cells unspecified the cell may include None as well.
+    # these methods are used for forward analysis.
+    def prereferences(self): return set()
+    def preupdates(self): return set()
 
+    # amount of pointer moves. it differs with amount of pointer moves
+    # in the loop body only -- use ComplexNode.stride() for it.
+    # it may return None if uncertain.
     def offsets(self): return 0
-    def references(self): return set()
-    def updates(self): return set()
-    def returns(self): return True
 
-    def reloffsets(self): return self.offsets()
+    # similar to pre* methods, but the offsets are relative to final pointer
+    # after execution. these methods are used for backward analysis.
+    # note that these will be same to pre* ones if offsets() returns 0.
+    def postreferences(self): return set()
+    def postupdates(self): return set()
+
+    # returns False if this node is an infinite loop.
+    def returns(self): return True
 
 class ComplexNode(Node, list):
     def empty(self):
@@ -479,35 +481,53 @@ class ComplexNode(Node, list):
             stride += ioffsets
         return stride
 
-    def bodyreferences(self):
+    def bodyprereferences(self):
         offsets = 0
         refs = []
         for child in self:
+            refs.extend(_setmovepointer(child.prereferences(), offsets))
             ioffsets = child.offsets()
             if ioffsets is None:
-                # invalidates prior updates, but not later nor current.
-                offsets = 0
-                refs = [None]
-            else:
-                offsets += ioffsets
-            refs.extend(i if i is None else i + offsets for i in child.references())
+                refs.append(None)
+                break
+            offsets += ioffsets
+        return set(refs)
 
-        # should return memory references relative to final pointer.
-        return set(i if i is None else i - offsets for i in refs)
-
-    def bodyupdates(self):
+    def bodypreupdates(self):
         offsets = 0
         updates = []
         for child in self:
+            updates.extend(_setmovepointer(child.preupdates(), offsets))
             ioffsets = child.offsets()
             if ioffsets is None:
-                offsets = 0
-                updates = [None]
-            else:
-                offsets += ioffsets
-            updates.extend(i if i is None else i + offsets for i in child.updates())
+                updates.append(None)
+                break
+            offsets += ioffsets
+        return set(updates)
 
-        return set(i if i is None else i - offsets for i in updates)
+    def bodypostreferences(self):
+        offsets = 0
+        refs = []
+        for child in self[::-1]:
+            ioffsets = child.offsets()
+            if ioffsets is None:
+                refs.append(None)
+                break
+            offsets -= ioffsets
+            refs.extend(_setmovepointer(child.postreferences(), offsets))
+        return set(refs)
+
+    def bodypostupdates(self):
+        offsets = 0
+        updates = []
+        for child in self[::-1]:
+            ioffsets = child.offsets()
+            if ioffsets is None:
+                updates.append(None)
+                break
+            offsets -= ioffsets
+            updates.extend(_setmovepointer(child.postupdates(), offsets))
+        return set(updates)
 
     def transforming(self):
         replacement = [] # to be modifiable in the closure
@@ -528,7 +548,7 @@ class Program(ComplexNode):
         emitter.write('/* generated by esotope-bfc */')
         emitter.write('#include <stdio.h>')
         emitter.write('#include <stdint.h>')
-        emitter.write('uint%d_t m[30000], *p = m;' % emitter.cellsize)
+        emitter.write('static uint%d_t m[30000], *p = m;' % emitter.cellsize)
         emitter.write('int main(void) {')
         emitter.indent()
         for child in self:
@@ -565,11 +585,13 @@ class SetMemory(Node):
     def withmemory(self, map):
         self.value = self.value.withmemory(map)
 
-    def references(self):
+    def prereferences(self):
         return self.value.references()
+    postreferences = prereferences
 
-    def updates(self):
+    def preupdates(self):
         return set([self.offset])
+    postupdates = preupdates
 
     def emit(self, emitter):
         emitter.write('p[%d] = %s;' % (self.offset, self.value))
@@ -595,11 +617,13 @@ class AdjustMemory(Node):
     def withmemory(self, map):
         self.delta = self.delta.withmemory(map)
 
-    def references(self):
+    def prereferences(self):
         return set([self.offset]) | self.delta.references()
+    postreferences = prereferences
 
-    def updates(self):
+    def preupdates(self):
         return set([self.offset])
+    postupdates = preupdates
 
     def emit(self, emitter):
         stmt = _formatadjust('p[%s]' % self.offset, self.delta)
@@ -647,8 +671,9 @@ class Input(Node):
     def movepointer(self, offset):
         self.offset += offset
 
-    def updates(self):
+    def preupdates(self):
         return set([self.offset])
+    postupdates = preupdates
 
     def emit(self, emitter):
         emitter.write('p[%s] = getchar();' % self.offset)
@@ -669,8 +694,9 @@ class Output(Node):
     def withmemory(self, map):
         self.expr = self.expr.withmemory(map)
 
-    def references(self):
+    def prereferences(self):
         return self.expr.references()
+    postreferences = prereferences
 
     def movepointer(self, offset):
         self.expr = self.expr.movepointer(offset)
@@ -702,7 +728,7 @@ class OutputConst(Node):
 
     def emit(self, emitter):
         for line in self.str.splitlines(True):
-            emitter.write('printf("%s");' % _addslashes(line))
+            emitter.write('fwrite("%s", 1, %d, stdout);' % (_addslashes(line), len(line)))
 
     def __repr__(self):
         return 'OutputConst[%r]' % self.str
@@ -722,10 +748,10 @@ class SeekMemory(Node):
     def movepointer(self, offset):
         self.target += offset
 
-    def reloffsets(self):
-        return 0 # SeekMemory cannot affect relative pointer
+    def prereferences(self):
+        return set([self.target, None])
 
-    def references(self):
+    def postreferences(self):
         return set([self.target, None])
 
     def emit(self, emitter):
@@ -763,11 +789,23 @@ class If(ComplexNode):
         else:
             return None
 
-    def references(self):
-        return self.bodyreferences() | self.cond.references()
+    def prereferences(self):
+        return self.bodyprereferences() | self.cond.references()
 
-    def updates(self):
-        return self.bodyupdates()
+    def postreferences(self):
+        bodyrefs = self.bodypostreferences()
+        stride = self.stride()
+        if stride is not None:
+            bodyrefs.update(_setmovepointer(self.cond.references(), -stride))
+        else:
+            bodyrefs.add(None) # we don't know where it is.
+        return bodyrefs
+
+    def preupdates(self):
+        return self.bodypreupdates()
+
+    def postupdates(self):
+        return self.bodypostupdates()
 
     def emit(self, emitter):
         if emitter.debugging:
@@ -804,15 +842,31 @@ class Repeat(ComplexNode):
         else:
             return None
 
-    def references(self):
-        bodyrefs = self.bodyreferences()
-        if bodyrefs and self.stride() != 0:
+    def prereferences(self):
+        bodyrefs = self.bodyprereferences()
+        stride = self.stride()
+        if bodyrefs and stride != 0:
             bodyrefs.add(None)
-        return bodyrefs | self.count.references()
+        return bodyrefs
 
-    def updates(self):
-        bodyupdates = self.bodyupdates()
-        if bodyupdates and self.stride() != 0:
+    def postreferences(self):
+        bodyrefs = self.bodypostreferences()
+        stride = self.stride()
+        if bodyrefs and stride != 0:
+            bodyrefs.add(None)
+        return bodyrefs
+
+    def preupdates(self):
+        bodyupdates = self.bodypreupdates()
+        stride = self.stride()
+        if bodyupdates and stride != 0:
+            bodyupdates.add(None)
+        return bodyupdates
+
+    def postupdates(self):
+        bodyupdates = self.bodypostupdates()
+        stride = self.stride()
+        if bodyupdates and stride != 0:
             bodyupdates.add(None)
         return bodyupdates
 
@@ -868,20 +922,31 @@ class While(ComplexNode):
         else:
             return None
 
-    def reloffsets(self):
-        if self.stride() is None:
-            return None
-        return 0
-
-    def references(self):
-        bodyrefs = self.bodyreferences()
-        if bodyrefs and self.stride() != 0:
+    def prereferences(self):
+        bodyrefs = self.bodyprereferences()
+        stride = self.stride()
+        if bodyrefs and stride != 0:
             bodyrefs.add(None)
         return bodyrefs | self.cond.references()
 
-    def updates(self):
-        bodyupdates = self.bodyupdates()
-        if bodyupdates and self.stride() != 0:
+    def postreferences(self):
+        bodyrefs = self.bodypostreferences()
+        stride = self.stride()
+        if bodyrefs and stride != 0:
+            bodyrefs.add(None)
+        return bodyrefs | self.cond.references()
+
+    def preupdates(self):
+        bodyupdates = self.bodypreupdates()
+        stride = self.stride()
+        if bodyupdates and stride != 0:
+            bodyupdates.add(None)
+        return bodyupdates
+
+    def postupdates(self):
+        bodyupdates = self.bodypostupdates()
+        stride = self.stride()
+        if bodyupdates and stride != 0:
             bodyupdates.add(None)
         return bodyupdates
 
@@ -932,6 +997,7 @@ class Emitter(object):
         elif stride != 0:
             self.write('// stride: %s' % stride)
 
+        return # TODO
         updates = node.updates()
         updatesmore = None in updates
         updates.discard(None)
@@ -998,7 +1064,7 @@ class Compiler(object):
 
     def optimize(self, node):
         node = self.optimize_simpleloop(node)
-        node = self.optimize_onceuponatime(node)
+        node = self.optimize_initialmemory(node)
         node = self.optimize_propagate(node)
         node = self.optimize_simpleloop(node)
         node = self.optimize_moreloop(node)
@@ -1035,11 +1101,8 @@ class Compiler(object):
                 if offsets != 0: result.append(MovePointer(offsets))
                 offsets = 0
 
-            ioffsets = cur.reloffsets()
-            if ioffsets is None:
-                if offsets != 0: result.append(MovePointer(offsets))
-                offsets = 0
-            else:
+            ioffsets = cur.offsets()
+            if ioffsets is not None:
                 offsets += ioffsets
 
             if isinstance(cur, MovePointer):
@@ -1093,26 +1156,25 @@ class Compiler(object):
 
     # adds redundant SetMemory nodes for later passes. other passes don't know
     # about initial memory contents, so it has to add such information explicitly.
-    def optimize_onceuponatime(self, node):
+    def optimize_initialmemory(self, node):
         if not isinstance(node, Program):
             return node
 
         offsets = 0
-        changed = set()
+        changed = set([None]) # for getting rid of None
         for i, cur, replace in node.transforming():
-            ioffsets = cur.offsets()
-            if ioffsets is None: break
-            offsets += ioffsets
-
-            refs = [j + offsets for j in cur.references() if j is not None]
-            updates = [j + offsets for j in cur.updates() if j is not None]
+            refs = _setmovepointer(cur.prereferences(), offsets)
+            updates = _setmovepointer(cur.preupdates(), offsets)
 
             zerorefs = set(refs) - changed
             if zerorefs:
                 replace(*([SetMemory(j - offsets, 0) for j in zerorefs] + [cur]))
                 changed.update(zerorefs)
-
             changed.update(updates)
+
+            ioffsets = cur.offsets()
+            if ioffsets is None: break
+            offsets += ioffsets
 
         return node
 
@@ -1150,7 +1212,6 @@ class Compiler(object):
             cell = Expr()
             cellset = None
             cellunknown = False
-            tobeignored = None
 
             for inode in cur:
                 if isinstance(inode, AdjustMemory):
@@ -1162,17 +1223,22 @@ class Compiler(object):
                         cellset = True
                         cellunknown = False
                 else:
-                    if inode.offsets() != 0:
+                    if not inode.pure():
                         convertible = 1
-
-                    updates = inode.updates()
-                    if None in updates or target in updates:
+                    if inode.offsets() != 0:
                         convertible = 1
                         cellunknown = True
 
-                refs = inode.references() - inode.updates()
-                if None in refs or target in refs:
-                    convertible = 1 # references target, cannot use Repeat[]
+                    if convertible == 0:
+                        updates = inode.preupdates()
+                        if None in preupdates or target in preupdates:
+                            convertible = 1
+                            cellunknown = True
+
+                if convertible == 0:
+                    refs = inode.prereferences() - inode.preupdates()
+                    if None in refs or target in refs:
+                        convertible = 1 # references target, cannot use Repeat[]
 
             if not convertible: continue
             if cellunknown or not cell.simple(): continue
@@ -1288,7 +1354,7 @@ class Compiler(object):
                 elif isinstance(cur, SeekMemory):
                     substs[cur.target] = cur.value
 
-            refs = cur.references()
+            refs = cur.postreferences()
             merged = False
             if alters:
                 if not mergable:
@@ -1332,6 +1398,11 @@ class Compiler(object):
     # XXX proper name
     def optimize_convarray(self, node):
         return node
+
+    # dead code elimination, sorta.
+    def optimize_removedead(self, node):
+        if not isinstance(node, ComplexNode):
+            return node
 
     # converts common idioms to direct C library call.
     def optimize_stdlib(self, node):
