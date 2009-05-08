@@ -522,17 +522,6 @@ class ComplexNode(Node, list):
             updates.extend(_setmovepointer(child.postupdates(), offsets))
         return set(updates)
 
-    def transforming(self):
-        replacement = [] # to be modifiable in the closure
-        def replace(*nodes): replacement[:] = nodes
-
-        i = 0
-        while i < len(self):
-            replacement[:] = [self[i]]
-            yield i, self[i], replace
-            self[i:i+1] = replacement
-            i += len(replacement)
-
     def __repr__(self):
         return list.__repr__(self)
 
@@ -983,6 +972,39 @@ class Emitter(object):
     def dedent(self):
         self.nindents -= 1
 
+class Transformer(object):
+    def __init__(self, target):
+        assert isinstance(target, list)
+        self.target = target
+        self.cursormin = 0
+        self.cursormax = 0
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.cursormax >= len(self.target):
+            raise StopIteration
+        self.cursormin = self.cursormax
+        self.cursormax += 1
+        return self.cursormin, self.target[self.cursormin]
+
+    def prepend(self, *items):
+        self.target[self.cursormin:self.cursormin] = items
+        self.cursormax += len(items)
+
+    def append(self, *items):
+        self.target[self.cursormax:self.cursormax] = items
+        self.cursormax += len(items)
+
+    def replace(self, *items):
+        self.target[self.cursormin:self.cursormax] = items
+        nitems = len(items)
+        self.cursormax = self.cursormin + nitems
+
+    def truncate(self):
+        del self.target[self.cursormax:]
+
 class Compiler(object):
     def __init__(self, cellsize=8):
         self.cellsize = cellsize
@@ -1054,28 +1076,24 @@ class Compiler(object):
             return node
 
         offsets = 0
-        for i, cur, replace in node.transforming():
+        tr = Transformer(node)
+        for i, cur in tr:
             if not cur: # remove no-op
-                replace()
+                tr.replace()
                 continue
 
-            result = []
             cur.movepointer(offsets)
-
             ioffsets = cur.offsets()
             if ioffsets is not None:
                 offsets += ioffsets
 
             if isinstance(cur, MovePointer):
-                replace(*result)
+                tr.replace()
                 continue
-
-            processed = False
 
             if isinstance(cur, If):
                 if isinstance(cur.cond, Always):
-                    result.extend(cur)
-                    processed = True
+                    tr.replace(*cur)
 
             elif isinstance(cur, Repeat):
                 hasset = False
@@ -1089,26 +1107,19 @@ class Compiler(object):
                         break
 
                 else:
-                    inodes = []
                     for inode in cur:
                         if isinstance(inode, AdjustMemory):
                             inode.delta *= cur.count
                     if hasset:
                         # cannot flatten, but we can turn it into If[]
-                        cond = ExprNotEqual(cur.count, 0)
-                        result.append(If(cond, cur[:]))
+                        tr.replace(If(ExprNotEqual(cur.count, 0), cur[:]))
                     else:
-                        result.extend(cur)
-                    processed = True
-
-            if not processed:
-                result.append(cur)
-            replace(*result)
+                        tr.replace(*cur)
 
             # if this command doesn't return, ignore all nodes after it.
-            if not result[-1].returns():
-                del node[i+len(result):]
-                return node
+            if not node[i-1].returns():
+                tr.truncate()
+                offsets = 0
 
         if offsets != 0:
             node.append(MovePointer(offsets))
@@ -1123,13 +1134,14 @@ class Compiler(object):
 
         offsets = 0
         changed = set([None]) # for getting rid of None
-        for i, cur, replace in node.transforming():
+        tr = Transformer(node)
+        for i, cur in tr:
             refs = _setmovepointer(cur.prereferences(), offsets)
             updates = _setmovepointer(cur.preupdates(), offsets)
 
             zerorefs = set(refs) - changed
             if zerorefs:
-                replace(*([SetMemory(j - offsets, 0) for j in zerorefs] + [cur]))
+                tr.prepend(*[SetMemory(j - offsets, 0) for j in zerorefs])
                 changed.update(zerorefs)
             changed.update(updates)
 
@@ -1156,7 +1168,8 @@ class Compiler(object):
             if isinstance(node[i], ComplexNode):
                 node[i] = self.optimize_simpleloop(node[i])
 
-        for i, cur, replace in node.transforming():
+        tr = Transformer(node)
+        for i, cur in tr:
             if not isinstance(cur, While): continue
             if not isinstance(cur.cond, MemNotEqual): continue
 
@@ -1164,7 +1177,7 @@ class Compiler(object):
             value = cur.cond.value
 
             if target == 0 and len(cur) == 1 and isinstance(cur[0], MovePointer):
-                replace(SeekMemory(0, cur[0].offset, value))
+                tr.replace(SeekMemory(0, cur[0].offset, value))
                 continue
 
             if cur.offsets() != 0: continue
@@ -1206,12 +1219,12 @@ class Compiler(object):
                 if delta == 0:
                     # XXX SetMemory is added temporarily; we should implement
                     # SSA-based optimizer and it will recognize them across basic blocks
-                    replace(If(cur.cond, cur[:]), SetMemory(target, value))
+                    tr.replace(If(cur.cond, cur[:]), SetMemory(target, value))
                 else:
                     infloop = While(Always())
                     if not cur.pure(): # e.g. +[.[-]+]
                         infloop.extend(cur)
-                    replace(infloop)
+                    tr.replace(infloop)
 
             elif flag:
                 # let w be the overflow value, which is 256 for char etc.
@@ -1228,7 +1241,7 @@ class Compiler(object):
                 # x is not (yet). so we shall add simple check for now.
 
                 if delta == 0:
-                    replace(While(Always()))
+                    tr.replace(While(Always()))
                     continue
 
                 u, v, gcd = _gcdex(delta, overflow)
@@ -1248,7 +1261,7 @@ class Compiler(object):
                     # don't emit Repeat[] if [-] or [+] is given.
                     result.append(Repeat(count, inodes))
                 result.append(SetMemory(target, value))
-                replace(*result)
+                tr.replace(*result)
 
         return self.cleanup(node)
 
@@ -1268,7 +1281,8 @@ class Compiler(object):
         usedrefs = {}
         substs = {} # only for simple one, unless some vars are not current
 
-        for i, cur, replace in node.transforming():
+        tr = Transformer(node)
+        for i, cur in tr:
             cur.withmemory(substs)
 
             alters = mergable = False
@@ -1292,7 +1306,7 @@ class Compiler(object):
                     if substs[offset].simple():
                         # replace with equivalent SetMemory node.
                         cur = SetMemory(offset, substs[offset])
-                        replace(cur)
+                        tr.replace(cur)
                     else:
                         del substs[offset]
             elif isinstance(cur, Input):
@@ -1303,7 +1317,7 @@ class Compiler(object):
             elif isinstance(cur, Output):
                 pass
             else: # MovePointer, While etc.
-                replace(self.optimize_propagate(cur))
+                tr.replace(self.optimize_propagate(cur))
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
@@ -1340,7 +1354,7 @@ class Compiler(object):
                                     node[target] = Nop()
                             else:
                                 node[target] = cur
-                            replace()
+                            tr.replace()
                             merged = True
 
                     if not merged:
@@ -1363,30 +1377,29 @@ class Compiler(object):
             return node
 
     # converts common idioms to direct C library call.
+    # - merges Output[] nodes into OutputConst[] node as much as possible.
     def optimize_stdlib(self, node):
         if not isinstance(node, ComplexNode):
             return node
 
-        inodes = []
         laststr = []
-        for inode in node:
-            if isinstance(inode, Output) and inode.expr.simple():
-                laststr.append(chr(int(inode.expr) & 0xff))
-            elif isinstance(inode, OutputConst):
-                laststr.append(inode.str)
-            elif isinstance(inode, (Input, SetMemory, AdjustMemory, MovePointer)):
-                inodes.append(inode) # doesn't affect string output
-            else:
+        tr = Transformer(node)
+        for i, cur in tr:
+            if isinstance(cur, Output) and cur.expr.simple():
+                tr.replace()
+                laststr.append(chr(int(cur.expr) & 0xff))
+            elif isinstance(cur, OutputConst):
+                tr.replace()
+                laststr.append(cur.str)
+            elif not isinstance(cur, (Input, SetMemory, AdjustMemory, MovePointer)):
+                tr.replace(self.optimize_stdlib(cur))
                 if laststr:
-                    inodes.append(OutputConst(''.join(laststr)))
+                    tr.prepend(OutputConst(''.join(laststr)))
                     laststr = []
-                if isinstance(inode, ComplexNode):
-                    inodes.append(self.optimize_stdlib(inode))
-                else:
-                    inodes.append(inode)
+
         if laststr:
-            inodes.append(OutputConst(''.join(laststr)))
-        node[:] = inodes
+            node.append(OutputConst(''.join(laststr)))
+
         return node
 
     def emit(self, node, debugging=False):
