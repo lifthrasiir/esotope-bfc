@@ -429,8 +429,6 @@ class Node(object):
     def pure(self): return True
 
     # moves all memory references in it by offset.
-    # if it is not possible (like While) canmovepointer should return False.
-    def canmovepointer(self, offset): return False
     def movepointer(self, offset): raise RuntimeError('not implemented')
 
     # propagates known memory cells given.
@@ -460,11 +458,6 @@ class Node(object):
 class ComplexNode(Node, list):
     def empty(self):
         return len(self) > 0
-
-    def canmovepointer(self, offset):
-        if offset == 0: return True
-        if self.offsets() != 0: return False
-        return all(child.canmovepointer(offset) for child in self)
 
     def movepointer(self, offset):
         if offset != 0:
@@ -575,9 +568,6 @@ class SetMemory(Node):
         self.offset = offset
         self.value = Expr(value)
 
-    def canmovepointer(self, offset):
-        return True
-
     def movepointer(self, offset):
         self.offset += offset
         self.value = self.value.movepointer(offset)
@@ -606,9 +596,6 @@ class AdjustMemory(Node):
 
     def __nonzero__(self):
         return self.delta != 0
-
-    def canmovepointer(self, offset):
-        return True
 
     def movepointer(self, offset):
         self.offset += offset
@@ -642,9 +629,6 @@ class MovePointer(Node):
     def __nonzero__(self):
         return self.offset != 0
 
-    def canmovepointer(self, offset):
-        return True
-
     def movepointer(self, offset):
         pass # no change
 
@@ -665,9 +649,6 @@ class Input(Node):
     def pure(self):
         return False
 
-    def canmovepointer(self, offset):
-        return True
-
     def movepointer(self, offset):
         self.offset += offset
 
@@ -687,9 +668,6 @@ class Output(Node):
 
     def pure(self):
         return False
-
-    def canmovepointer(self, offset):
-        return True
 
     def withmemory(self, map):
         self.expr = self.expr.withmemory(map)
@@ -720,9 +698,6 @@ class OutputConst(Node):
     def pure(self):
         return False
 
-    def canmovepointer(self, offset):
-        return True
-
     def movepointer(self, offset):
         pass # does nothing
 
@@ -741,9 +716,6 @@ class SeekMemory(Node):
 
     def offsets(self):
         return None
-
-    def canmovepointer(self, offset):
-        return True
 
     def movepointer(self, offset):
         self.target += offset
@@ -901,11 +873,6 @@ class While(ComplexNode):
     def __nonzero__(self):
         # infinite loop should return True, even if there are no children.
         return bool(self.cond)
-
-    def canmovepointer(self, offset):
-        if offset == 0: return True
-        if self.stride() is None: return False
-        return all(child.canmovepointer(offset) for child in self)
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
@@ -1093,13 +1060,7 @@ class Compiler(object):
                 continue
 
             result = []
-
-            if cur.canmovepointer(offsets):
-                cur.movepointer(offsets)
-            else:
-                # movepointer failed, flush current MovePointer node before it
-                if offsets != 0: result.append(MovePointer(offsets))
-                offsets = 0
+            cur.movepointer(offsets)
 
             ioffsets = cur.offsets()
             if ioffsets is not None:
@@ -1208,10 +1169,9 @@ class Compiler(object):
 
             if cur.offsets() != 0: continue
 
-            convertible = 2 # 0:impossible, 1:only conditional, 2:possible
+            flag = True # whether Repeat[] is applicable
             cell = Expr()
-            cellset = None
-            cellunknown = False
+            mode = 0 # 0:adjust, 1:set, -1:unknown
 
             for inode in cur:
                 if isinstance(inode, AdjustMemory):
@@ -1220,31 +1180,29 @@ class Compiler(object):
                 elif isinstance(inode, SetMemory):
                     if inode.offset == target:
                         cell = inode.value
-                        cellset = True
-                        cellunknown = False
+                        mode = 1
                 else:
                     if not inode.pure():
-                        convertible = 1
+                        flag = False
                     if inode.offsets() != 0:
-                        convertible = 1
-                        cellunknown = True
+                        flag = False
+                        mode = -1
 
-                    if convertible == 0:
+                    if flag:
                         updates = inode.preupdates()
-                        if None in preupdates or target in preupdates:
-                            convertible = 1
-                            cellunknown = True
+                        if None in updates or target in updates:
+                            flag = False
+                            mode = -1
 
-                if convertible == 0:
+                if flag:
                     refs = inode.prereferences() - inode.preupdates()
                     if None in refs or target in refs:
-                        convertible = 1 # references target, cannot use Repeat[]
+                        flag = False # references target, cannot use Repeat[]
 
-            if not convertible: continue
-            if cellunknown or not cell.simple(): continue
+            if mode < 0 or not cell.simple(): continue
             delta = (value - int(cell)) % overflow
 
-            if cellset:
+            if mode > 0:
                 if delta == 0:
                     # XXX SetMemory is added temporarily; we should implement
                     # SSA-based optimizer and it will recognize them across basic blocks
@@ -1255,7 +1213,7 @@ class Compiler(object):
                         infloop.extend(cur)
                     replace(infloop)
 
-            elif convertible > 1:
+            elif flag:
                 # let w be the overflow value, which is 256 for char etc.
                 # then there are three cases in the following code:
                 #     i = 0; for (j = 0; i != x; ++j) i += m;
