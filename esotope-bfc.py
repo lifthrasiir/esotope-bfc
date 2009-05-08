@@ -1201,16 +1201,14 @@ class Compiler(object):
                         flag = False
                         mode = -1
 
-                    if flag:
-                        updates = inode.preupdates()
-                        if None in updates or target in updates:
-                            flag = False
-                            mode = -1
+                    updates = inode.postupdates()
+                    if None in updates or target in updates:
+                        flag = False
+                        mode = -1
 
-                if flag:
-                    refs = inode.prereferences() - inode.preupdates()
-                    if None in refs or target in refs:
-                        flag = False # references target, cannot use Repeat[]
+                refs = inode.postreferences() - inode.postupdates()
+                if None in refs or target in refs:
+                    flag = False # references target, cannot use Repeat[]
 
             if mode < 0 or not cell.simple(): continue
             delta = (value - int(cell)) % overflow
@@ -1391,7 +1389,7 @@ class Compiler(object):
             elif isinstance(cur, OutputConst):
                 tr.replace()
                 laststr.append(cur.str)
-            elif not isinstance(cur, (Input, SetMemory, AdjustMemory, MovePointer)):
+            elif not cur.pure(): # I/O cannot be reordered!
                 tr.replace(self.optimize_stdlib(cur))
                 if laststr:
                     tr.prepend(OutputConst(''.join(laststr)))
