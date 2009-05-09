@@ -5,8 +5,8 @@
 import sys
 import getopt
 
-#try: import psyco; psyco.full()
-#except ImportError: pass
+try: import psyco; psyco.full()
+except ImportError: pass
 
 
 def _setmovepointer(cells, offset):
@@ -269,6 +269,11 @@ class Expr(object):
 
     def references(self):
         code = self.code
+        if len(code) == 1:
+            return set()
+        elif len(code) == 2 and code[1] is _EXPRREF:
+            return set([code[0]])
+
         getpartial = self._getpartial
 
         refs = set()
@@ -279,8 +284,10 @@ class Expr(object):
 
     def movepointer(self, delta):
         code = self.code
-        if len(code) == 1: # optimization for common case
+        if len(code) == 1:
             return Expr(code)
+        elif len(code) == 2 and code[1] is _EXPRREF:
+            return Expr([code[0] + delta, _EXPRREF])
 
         getpartial = self._getpartial
         simplify = self._simplify
@@ -299,6 +306,12 @@ class Expr(object):
 
     def withmemory(self, map):
         code = self.code
+        if len(code) == 1:
+            return Expr(code)
+        elif len(code) == 2 and code[1] is _EXPRREF:
+            try: return map[code[0]]
+            except KeyError: return Expr(code)
+
         getpartial = self._getpartial
 
         newcode = []
