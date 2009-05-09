@@ -421,6 +421,103 @@ class ExprNotEqual(Condition):
         return '%r!=%r' % (self.expr, self.value)
 
 
+class cellset(object):
+    __slots__ = ('sure', 'unsure')
+
+    def __init__(self, sure=None, unsure=None, others=None):
+        if isinstance(sure, cellset) and unsure is None and others is None:
+            unsure = sure.unsure
+            sure = sure.sure
+
+        self.sure = set(sure or ())
+        self.unsure = set(unsure or ()) | self.sure
+        if others: self.sure.add(None)
+        if others is not None: self.unsure.add(None)
+
+    def addsure(self, item):
+        self.sure.add(item)
+        self.unsure.add(item)
+
+    def addunsure(self, item):
+        self.unsure.add(item)
+
+    def updatesure(self, items):
+        self.sure.update(items)
+        self.unsure.update(items)
+
+    def updateunsure(self, items):
+        self.unsure.update(items)
+
+    def clearsure(self):
+        self.sure.clear()
+
+    def clearunsure(self):
+        self.unsure = self.sure.copy()
+
+    def itersure(self):
+        return iter(self.sure - set([None]))
+
+    def iterunsure(self):
+        return iter(self.unsure - set([None]))
+
+    def movepointer(self, offsets):
+        if offsets == 0: return cellset(self)
+        return cellset(sure=_setmovepointer(self.sure, offsets),
+                       unsure=_setmovepointer(self.unsure, offsets))
+
+    def __nonzero__(self):
+        return bool(self.sure) and bool(self.unsure)
+
+    def __eq__(lhs, rhs):
+        return lhs.sure == rhs.sure and lhs.unsure == rhs.unsure
+
+    def __ne__(lhs, rhs):
+        return lhs.sure != rhs.sure or lhs.unsure != rhs.unsure
+
+    def __ior__(lhs, rhs):
+        lhs.sure |= rhs.sure
+        lhs.unsure |= rhs.unsure
+        return lhs
+    update = __ior__
+
+    def __or__(lhs, rhs):
+        result = cellset(lhs)
+        result |= rhs
+        return result
+
+    def __iand__(lhs, rhs):
+        lhs.sure &= rhs.sure
+        lhs.unsure &= rhs.unsure
+        return lhs
+
+    def __and__(lhs, rhs):
+        result = cellset(lhs)
+        result &= rhs
+        return result
+
+    def __isub__(lhs, rhs):
+        lhs.sure -= rhs.sure
+        lhs.unsure -= rhs.unsure
+        return lhs
+
+    def __sub__(lhs, rhs):
+        result = cellset(lhs)
+        result -= rhs
+        return result
+
+    def _repr_set(self, set):
+        set = set.copy()
+        try:
+            set.remove(None)
+            if not set: return '[...]'
+            return '[%s, ...]' % repr(list(set))[1:-1]
+        except KeyError:
+            return repr(list(set))
+
+    def __repr__(self):
+        return 'cellset(%s, %s)' % (self._repr_set(self.sure),
+                                    self._repr_set(self.unsure - self.sure))
+
 class Node(object):
     # returns False if it is a no-op. cleanup pass will remove such no-ops.
     def __nonzero__(self): return True
@@ -436,10 +533,9 @@ class Node(object):
 
     # a set of offset to memory cells which may be referenced/updated by
     # this node, relative to initial pointer before execution.
-    # if there are more cells unspecified the cell may include None as well.
     # these methods are used for forward analysis.
-    def prereferences(self): return set()
-    def preupdates(self): return set()
+    def prereferences(self): return cellset()
+    def preupdates(self): return cellset()
 
     # amount of pointer moves. it differs with amount of pointer moves
     # in the loop body only -- use ComplexNode.stride() for it.
@@ -449,8 +545,8 @@ class Node(object):
     # similar to pre* methods, but the offsets are relative to final pointer
     # after execution. these methods are used for backward analysis.
     # note that these will be same to pre* ones if offsets() returns 0.
-    def postreferences(self): return set()
-    def postupdates(self): return set()
+    def postreferences(self): return cellset()
+    def postupdates(self): return cellset()
 
     # returns False if this node is an infinite loop.
     def returns(self): return True
@@ -476,51 +572,51 @@ class ComplexNode(Node, list):
 
     def bodyprereferences(self):
         offsets = 0
-        refs = []
+        refs = cellset()
         for child in self:
-            refs.extend(_setmovepointer(child.prereferences(), offsets))
+            refs |= child.prereferences().movepointer(offsets)
             ioffsets = child.offsets()
             if ioffsets is None:
-                refs.append(None)
+                refs.addsure(None)
                 break
             offsets += ioffsets
-        return set(refs)
+        return refs
 
     def bodypreupdates(self):
         offsets = 0
-        updates = []
+        updates = cellset()
         for child in self:
-            updates.extend(_setmovepointer(child.preupdates(), offsets))
+            updates |= child.preupdates().movepointer(offsets)
             ioffsets = child.offsets()
             if ioffsets is None:
-                updates.append(None)
+                updates.addsure(None)
                 break
             offsets += ioffsets
-        return set(updates)
+        return updates
 
     def bodypostreferences(self):
         offsets = 0
-        refs = []
+        refs = cellset()
         for child in self[::-1]:
             ioffsets = child.offsets()
             if ioffsets is None:
-                refs.append(None)
+                refs.addsure(None)
                 break
             offsets -= ioffsets
-            refs.extend(_setmovepointer(child.postreferences(), offsets))
-        return set(refs)
+            refs |= child.postreferences().movepointer(offsets)
+        return refs
 
     def bodypostupdates(self):
         offsets = 0
-        updates = []
+        updates = cellset()
         for child in self[::-1]:
             ioffsets = child.offsets()
             if ioffsets is None:
-                updates.append(None)
+                updates.addsure(None)
                 break
             offsets -= ioffsets
-            updates.extend(_setmovepointer(child.postupdates(), offsets))
-        return set(updates)
+            updates |= child.postupdates().movepointer(offsets)
+        return updates
 
     def __repr__(self):
         return list.__repr__(self)
@@ -565,11 +661,11 @@ class SetMemory(Node):
         self.value = self.value.withmemory(map)
 
     def prereferences(self):
-        return self.value.references()
+        return cellset(sure=self.value.references())
     postreferences = prereferences
 
     def preupdates(self):
-        return set([self.offset])
+        return cellset(sure=[self.offset])
     postupdates = preupdates
 
     def emit(self, emitter):
@@ -594,11 +690,11 @@ class AdjustMemory(Node):
         self.delta = self.delta.withmemory(map)
 
     def prereferences(self):
-        return set([self.offset]) | self.delta.references()
+        return cellset(sure=self.delta.references().union([self.offset]))
     postreferences = prereferences
 
     def preupdates(self):
-        return set([self.offset])
+        return cellset(sure=[self.offset])
     postupdates = preupdates
 
     def emit(self, emitter):
@@ -642,7 +738,7 @@ class Input(Node):
         self.offset += offset
 
     def preupdates(self):
-        return set([self.offset])
+        return cellset(sure=[self.offset])
     postupdates = preupdates
 
     def emit(self, emitter):
@@ -662,7 +758,7 @@ class Output(Node):
         self.expr = self.expr.withmemory(map)
 
     def prereferences(self):
-        return self.expr.references()
+        return cellset(sure=self.expr.references())
     postreferences = prereferences
 
     def movepointer(self, offset):
@@ -710,10 +806,10 @@ class SeekMemory(Node):
         self.target += offset
 
     def prereferences(self):
-        return set([self.target, None])
+        return cellset(sure=[self.target], others=False)
 
     def postreferences(self):
-        return set([self.target, None])
+        return cellset(sure=[self.target], others=False)
 
     def emit(self, emitter):
         accumstmt = _formatadjust('p', self.stride)
@@ -751,22 +847,23 @@ class If(ComplexNode):
             return None
 
     def prereferences(self):
-        return self.bodyprereferences() | self.cond.references()
+        return cellset(sure=self.cond.references(),
+                       unsure=self.bodyprereferences().unsure)
 
     def postreferences(self):
-        bodyrefs = self.bodypostreferences()
+        bodyrefs = cellset(unsure=self.bodypostreferences().unsure)
         stride = self.stride()
         if stride is not None:
-            bodyrefs.update(_setmovepointer(self.cond.references(), -stride))
+            bodyrefs.updatesure(_setmovepointer(self.cond.references(), -stride))
         else:
-            bodyrefs.add(None) # we don't know where it is.
+            bodyrefs.addsure(None) # we don't know where it is.
         return bodyrefs
 
     def preupdates(self):
-        return self.bodypreupdates()
+        return cellset(unsure=self.bodypreupdates().unsure)
 
     def postupdates(self):
-        return self.bodypostupdates()
+        return cellset(unsure=self.bodypostupdates().unsure)
 
     def emit(self, emitter):
         if emitter.debugging:
@@ -804,31 +901,34 @@ class Repeat(ComplexNode):
             return None
 
     def prereferences(self):
-        bodyrefs = self.bodyprereferences()
+        bodyrefs = cellset(sure=self.count.references(),
+                           unsure=self.bodyprereferences().unsure)
         stride = self.stride()
-        if bodyrefs and stride != 0:
-            bodyrefs.add(None)
+        if stride != 0:
+            bodyrefs.addunsure(None)
         return bodyrefs
 
     def postreferences(self):
-        bodyrefs = self.bodypostreferences()
+        bodyrefs = cellset(unsure=self.bodypostreferences().unsure)
         stride = self.stride()
-        if bodyrefs and stride != 0:
-            bodyrefs.add(None)
+        if stride is not None:
+            bodyrefs.updatesure(_setmovepointer(self.count.references(), -stride))
+        if stride != 0:
+            bodyrefs.addunsure(None)
         return bodyrefs
 
     def preupdates(self):
-        bodyupdates = self.bodypreupdates()
+        bodyupdates = cellset(unsure=self.bodypreupdates().unsure)
         stride = self.stride()
-        if bodyupdates and stride != 0:
-            bodyupdates.add(None)
+        if stride != 0:
+            bodyupdates.addunsure(None)
         return bodyupdates
 
     def postupdates(self):
-        bodyupdates = self.bodypostupdates()
+        bodyupdates = cellset(unsure=self.bodypostupdates().unsure)
         stride = self.stride()
-        if bodyupdates and stride != 0:
-            bodyupdates.add(None)
+        if stride != 0:
+            bodyupdates.addunsure(None)
         return bodyupdates
 
     def emit(self, emitter):
@@ -879,31 +979,33 @@ class While(ComplexNode):
             return None
 
     def prereferences(self):
-        bodyrefs = self.bodyprereferences()
+        bodyrefs = cellset(sure=self.cond.references(),
+                           unsure=self.bodyprereferences().unsure)
         stride = self.stride()
-        if bodyrefs and stride != 0:
-            bodyrefs.add(None)
-        return bodyrefs | self.cond.references()
+        if stride != 0:
+            bodyrefs.addunsure(None)
+        return bodyrefs
 
     def postreferences(self):
-        bodyrefs = self.bodypostreferences()
+        bodyrefs = cellset(sure=self.cond.references(),
+                           unsure=self.bodypostreferences().unsure)
         stride = self.stride()
-        if bodyrefs and stride != 0:
-            bodyrefs.add(None)
-        return bodyrefs | self.cond.references()
+        if stride != 0:
+            bodyrefs.addunsure(None)
+        return bodyrefs
 
     def preupdates(self):
-        bodyupdates = self.bodypreupdates()
+        bodyupdates = cellset(unsure=self.bodypreupdates().unsure)
         stride = self.stride()
-        if bodyupdates and stride != 0:
-            bodyupdates.add(None)
+        if stride != 0:
+            bodyupdates.addunsure(None)
         return bodyupdates
 
     def postupdates(self):
-        bodyupdates = self.bodypostupdates()
+        bodyupdates = cellset(unsure=self.bodypostupdates().unsure)
         stride = self.stride()
-        if bodyupdates and stride != 0:
-            bodyupdates.add(None)
+        if stride != 0:
+            bodyupdates.addunsure(None)
         return bodyupdates
 
     def returns(self):
@@ -953,15 +1055,9 @@ class Emitter(object):
         elif stride != 0:
             self.write('// stride: %s' % stride)
 
-        return # TODO
-        updates = node.updates()
-        updatesmore = None in updates
-        updates.discard(None)
-        updates = ' '.join(map(str, sorted(updates)))
-        if updatesmore:
-            self.write('// clobbers: %s (and possibly more)' % updates)
-        elif updates:
-            self.write('// clobbers: %s' % updates)
+        updates = node.postupdates()
+        if updates:
+            self.write('// clobbers: %r' % updates)
 
     def write(self, line):
         print '\t' * self.nindents + line
@@ -1058,6 +1154,7 @@ class Compiler(object):
         node = self.optimize_simpleloop(node)
         node = self.optimize_moreloop(node)
         node = self.optimize_propagate(node)
+        node = self.optimize_removedead(node)
         node = self.optimize_stdlib(node)
         return node
 
@@ -1117,7 +1214,7 @@ class Compiler(object):
                         tr.replace(*cur)
 
             # if this command doesn't return, ignore all nodes after it.
-            if not node[i-1].returns():
+            if not cur.returns():
                 tr.truncate()
                 offsets = 0
 
@@ -1136,14 +1233,14 @@ class Compiler(object):
         changed = set([None]) # for getting rid of None
         tr = Transformer(node)
         for i, cur in tr:
-            refs = _setmovepointer(cur.prereferences(), offsets)
-            updates = _setmovepointer(cur.preupdates(), offsets)
+            refs = cur.prereferences().movepointer(offsets)
+            updates = cur.preupdates().movepointer(offsets)
 
-            zerorefs = set(refs) - changed
+            zerorefs = set(refs.unsure) - changed
             if zerorefs:
                 tr.prepend(*[SetMemory(j - offsets, 0) for j in zerorefs])
                 changed.update(zerorefs)
-            changed.update(updates)
+            changed.update(updates.unsure)
 
             ioffsets = cur.offsets()
             if ioffsets is None: break
@@ -1201,12 +1298,12 @@ class Compiler(object):
                         flag = False
                         mode = -1
 
-                    updates = inode.postupdates()
+                    updates = inode.postupdates().unsure
                     if None in updates or target in updates:
                         flag = False
                         mode = -1
 
-                refs = inode.postreferences() - inode.postupdates()
+                refs = inode.postreferences().unsure - inode.postupdates().sure
                 if None in refs or target in refs:
                     flag = False # references target, cannot use Repeat[]
 
@@ -1324,7 +1421,7 @@ class Compiler(object):
                 elif isinstance(cur, SeekMemory):
                     substs[cur.target] = cur.value
 
-            refs = cur.postreferences()
+            refs = cur.postreferences().unsure
             merged = False
             if alters:
                 if not mergable:
@@ -1369,10 +1466,63 @@ class Compiler(object):
     def optimize_convarray(self, node):
         return node
 
-    # dead code elimination, sorta.
+    # dead code elimination, sorta. doesn't do so across basic blocks yet.
     def optimize_removedead(self, node):
         if not isinstance(node, ComplexNode):
             return node
+
+        unusedcells = {} # cell -> node which last updated this cell
+        unusednodes = set()
+
+        offsets = 0
+        tr = Transformer(node)
+        for i, cur in tr:
+            cur = self.optimize_removedead(cur)
+            tr.replace(cur)
+
+            ioffsets = cur.offsets()
+            if ioffsets is None:
+                unusedcells.clear()
+                unusednodes.clear()
+            else:
+                offsets += ioffsets
+
+            irefs = cur.postreferences().unsure
+            iupdates = cur.postupdates().sure
+            removable = cur.pure() and ioffsets == 0
+
+            # delete references to all nodes which updates the cell which
+            # this node can reference, thus cannot be removed.
+            if None in irefs:
+                unusedcells.clear()
+                unusednodes.clear()
+            else:
+                for j in irefs:
+                    j += offsets
+                    try: unusednodes.discard(unusedcells.pop(j))
+                    except: pass
+
+            # now removes all nodes which cell updates have been never
+            # referenced, and is to be (certainly) updated by this node.
+            iupdates.discard(None)
+            for j in iupdates:
+                j += offsets
+                try:
+                    oldi = unusedcells[j]
+                    unusednodes.remove(oldi) # will raise exception if none
+                    node[oldi] = Nop()
+                except:
+                    pass
+
+                if removable:
+                    unusedcells[j] = i
+                    unusednodes.add(i)
+
+        if isinstance(node, Program):
+            for i in unusednodes:
+                node[i] = Nop()
+
+        return self.cleanup(node)
 
     # converts common idioms to direct C library call.
     # - merges Output[] nodes into OutputConst[] node as much as possible.
