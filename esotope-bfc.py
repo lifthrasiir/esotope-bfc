@@ -1,12 +1,12 @@
-#!/usr/bin/env python
+#!/usr/bin/env python -O
 # Esotope Brainfuck-to-C Compiler
 # Copyright (c) 2009, Kang Seonghoon.
 
 import sys
 import getopt
 
-try: import psyco; psyco.full()
-except ImportError: pass
+#try: import psyco; psyco.full()
+#except ImportError: pass
 
 
 def _setmovepointer(cells, offset):
@@ -279,6 +279,9 @@ class Expr(object):
 
     def movepointer(self, delta):
         code = self.code
+        if len(code) == 1: # optimization for common case
+            return Expr(code)
+
         getpartial = self._getpartial
         simplify = self._simplify
 
@@ -425,14 +428,13 @@ class cellset(object):
     __slots__ = ('sure', 'unsure')
 
     def __init__(self, sure=None, unsure=None, others=None):
-        if isinstance(sure, cellset) and unsure is None and others is None:
-            unsure = sure.unsure
-            sure = sure.sure
-
         self.sure = set(sure or ())
         self.unsure = set(unsure or ()) | self.sure
         if others: self.sure.add(None)
         if others is not None: self.unsure.add(None)
+
+    def copy(self):
+        return cellset(sure=self.sure, unsure=self.unsure)
 
     def addsure(self, item):
         self.sure.add(item)
@@ -461,7 +463,7 @@ class cellset(object):
         return iter(self.unsure - set([None]))
 
     def movepointer(self, offsets):
-        if offsets == 0: return cellset(self)
+        if offsets == 0: return self.copy()
         return cellset(sure=_setmovepointer(self.sure, offsets),
                        unsure=_setmovepointer(self.unsure, offsets))
 
@@ -481,9 +483,7 @@ class cellset(object):
     update = __ior__
 
     def __or__(lhs, rhs):
-        result = cellset(lhs)
-        result |= rhs
-        return result
+        return cellset(sure=lhs.sure | rhs.sure, unsure=lhs.unsure | rhs.unsure)
 
     def __iand__(lhs, rhs):
         lhs.sure &= rhs.sure
@@ -491,9 +491,7 @@ class cellset(object):
         return lhs
 
     def __and__(lhs, rhs):
-        result = cellset(lhs)
-        result &= rhs
-        return result
+        return cellset(sure=lhs.sure & rhs.sure, unsure=lhs.unsure & rhs.unsure)
 
     def __isub__(lhs, rhs):
         lhs.sure -= rhs.sure
@@ -501,9 +499,7 @@ class cellset(object):
         return lhs
 
     def __sub__(lhs, rhs):
-        result = cellset(lhs)
-        result -= rhs
-        return result
+        return cellset(sure=lhs.sure - rhs.sure, unsure=lhs.unsure - rhs.unsure)
 
     def _repr_set(self, set):
         set = set.copy()
@@ -1148,15 +1144,22 @@ class Compiler(object):
         return nodestack[0]
 
     def optimize(self, node):
-        node = self.optimize_simpleloop(node)
+        node = self.optimize_simpleloop_recur(node)
         node = self.optimize_initialmemory(node)
-        node = self.optimize_propagate(node)
-        node = self.optimize_simpleloop(node)
-        node = self.optimize_moreloop(node)
-        node = self.optimize_propagate(node)
-        node = self.optimize_removedead(node)
-        node = self.optimize_stdlib(node)
+        node = self.optimize_propagate_recur(node)
+        node = self.optimize_simpleloop_recur(node)
+        node = self.optimize_propagate_recur(node)
+        node = self.optimize_removedead_recur(node)
+        node = self.optimize_stdlib_recur(node)
         return node
+
+    # calls given function with all nodes within node recursively,
+    # in the reverse order of depth-first search.
+    def visit(self, node, func):
+        visit = self.visit
+        for inode in node:
+            if isinstance(inode, ComplexNode): visit(inode, func)
+        return func(node)
 
     # general node cleanup routine. it does the following jobs:
     # - removes every no-op nodes, including If[False; ...] and k+=0.
@@ -1169,9 +1172,6 @@ class Compiler(object):
     # this is not recursive, and intended to be called in the end of other
     # optimization passes.
     def cleanup(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
         offsets = 0
         tr = Transformer(node)
         for i, cur in tr:
@@ -1256,14 +1256,7 @@ class Compiler(object):
     # - While[p[0]!=v; MovePointer[y]], where y is const.
     #   this nodes will be replaced by SeekMemory[p[y*k]!=v].
     def optimize_simpleloop(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
         overflow = 1 << self.cellsize
-
-        for i in xrange(len(node)):
-            if isinstance(node[i], ComplexNode):
-                node[i] = self.optimize_simpleloop(node[i])
 
         tr = Transformer(node)
         for i, cur in tr:
@@ -1360,6 +1353,9 @@ class Compiler(object):
 
         return self.cleanup(node)
 
+    def optimize_simpleloop_recur(self, node):
+        return self.visit(node, self.optimize_simpleloop)
+
     # extensive loop optimization. it calculates repeat count if possible and
     # tries to convert them into For[].
     def optimize_moreloop(self, node):
@@ -1369,9 +1365,6 @@ class Compiler(object):
     # requires minptrloops pass for optimal processing. otherwise MovePointer
     # will act as memory blocker.
     def optimize_propagate(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
         backrefs = {}
         usedrefs = {}
         substs = {} # only for simple one, unless some vars are not current
@@ -1412,7 +1405,6 @@ class Compiler(object):
             elif isinstance(cur, Output):
                 pass
             else: # MovePointer, While etc.
-                tr.replace(self.optimize_propagate(cur))
                 backrefs.clear()
                 usedrefs.clear()
                 substs.clear()
@@ -1462,24 +1454,21 @@ class Compiler(object):
 
         return self.cleanup(node)
 
+    def optimize_propagate_recur(self, node):
+        return self.visit(node, self.optimize_propagate)
+
     # XXX proper name
     def optimize_convarray(self, node):
         return node
 
     # dead code elimination, sorta. doesn't do so across basic blocks yet.
     def optimize_removedead(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
         unusedcells = {} # cell -> node which last updated this cell
         unusednodes = set()
 
         offsets = 0
         tr = Transformer(node)
         for i, cur in tr:
-            cur = self.optimize_removedead(cur)
-            tr.replace(cur)
-
             ioffsets = cur.offsets()
             if ioffsets is None:
                 unusedcells.clear()
@@ -1524,12 +1513,12 @@ class Compiler(object):
 
         return self.cleanup(node)
 
+    def optimize_removedead_recur(self, node):
+        return self.visit(node, self.optimize_removedead)
+
     # converts common idioms to direct C library call.
     # - merges Output[] nodes into OutputConst[] node as much as possible.
     def optimize_stdlib(self, node):
-        if not isinstance(node, ComplexNode):
-            return node
-
         laststr = []
         tr = Transformer(node)
         for i, cur in tr:
@@ -1540,15 +1529,16 @@ class Compiler(object):
                 tr.replace()
                 laststr.append(cur.str)
             elif not cur.pure(): # I/O cannot be reordered!
-                tr.replace(self.optimize_stdlib(cur))
-                if laststr:
-                    tr.prepend(OutputConst(''.join(laststr)))
-                    laststr = []
+                if laststr: tr.prepend(OutputConst(''.join(laststr)))
+                laststr = []
 
         if laststr:
             node.append(OutputConst(''.join(laststr)))
 
         return node
+
+    def optimize_stdlib_recur(self, node):
+        return self.visit(node, self.optimize_stdlib)
 
     def emit(self, node, debugging=False):
         node.emit(Emitter(self, debugging))
