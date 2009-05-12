@@ -1,0 +1,77 @@
+#!/usr/bin/env python -O
+# Esotope Brainfuck-to-C Compiler
+# Copyright (c) 2009, Kang Seonghoon.
+
+import sys
+import getopt
+
+try: import psyco; psyco.full()
+except ImportError: pass
+
+from bfc.compiler import Compiler
+
+def usage(progname):
+    print >>sys.stderr, '''\
+Esotope Brainfuck compiler
+Copyright (c) 2009, Kang Seonghoon.
+
+Usage: %s [options] filename  (from file)
+       %s [options] -         (from stdin)
+
+Options:
+-h, --help
+    Shows this message.
+-s BITS, --cellsize BITS
+    Sets the size of each memory size. BITS can be 8, 16 or 32, and
+    defaults to 8.
+--debug
+    Enables debugging output (as C comment) in the code.
+
+For more information please visit http://esotope-bfc.googlecode.com/.
+''' % (progname, progname)
+
+def main(argv):
+    try:
+        opts, args = getopt.getopt(argv[1:], 'hs:',
+                ['help', 'cellsize=', 'debug'])
+    except getopt.GetoptError, err:
+        print >>sys.stderr, 'Error: %s' % err
+        print >>sys.stderr, 'Type "%s --help" for usage.' % argv[0]
+        return 1
+
+    cellsize = 8
+    debugging = False
+    for opt, arg in opts:
+        if opt in ('-h', '--help'):
+            usage(argv[0])
+            return 0
+        elif opt in ('-s', '--cellsize'):
+            try:
+                cellsize = int(arg)
+                if cellsize not in (8, 16, 32): raise ValueError
+            except:
+                print >>sys.stderr, 'Error: Invalid cell size %r.' % arg
+                return 1
+        elif opt == '--debug':
+            debugging = True
+        else:
+            assert False
+
+    if not args:
+        print >>sys.stderr, 'Type "%s --help" for usage.' % argv[0]
+        return 1
+
+    if args[0] == '-':
+        fp = sys.stdin
+    else:
+        fp = open(args[0], 'r')
+
+    compiler = Compiler(cellsize=cellsize)
+    node = compiler.parse(fp)
+    node = compiler.optimize(node)
+    compiler.emit(node, debugging)
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+
