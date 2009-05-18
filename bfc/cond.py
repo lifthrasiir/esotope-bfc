@@ -9,12 +9,10 @@ class Condition(object):
     def withmemory(self, map): return self
 
 class Always(Condition):
-    def __str__(self): return '1'
     def __repr__(self): return 'True'
 
 class Never(Condition):
     def __nonzero__(self): return False
-    def __str__(self): return '0'
     def __repr__(self): return 'False'
 
 class MemNotEqual(Condition):
@@ -37,17 +35,11 @@ class MemNotEqual(Condition):
         except KeyError:
             return self
 
-    def __str__(self):
-        if self.value == 0:
-            return 'p[%s]' % self.target
-        else:
-            return 'p[%s] != %s' % (self.target, self.value)
-
     def __repr__(self):
         if self.value == 0:
-            return 'p[%r]' % self.target
+            return '{%r}' % self.target
         else:
-            return 'p[%r]!=%r' % (self.target, self.value)
+            return '{%r}!=%r' % (self.target, self.value)
 
 class ExprNotEqual(Condition):
     def __init__(self, expr, value=0):
@@ -69,9 +61,6 @@ class ExprNotEqual(Condition):
                 return Never()
         else:
             return ExprNotEqual(expr, self.value)
-
-    def __str__(self):
-        return '%s != %s' % (self.expr, self.value)
 
     def __repr__(self):
         return '%r!=%r' % (self.expr, self.value)

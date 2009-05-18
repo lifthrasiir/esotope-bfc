@@ -1,7 +1,5 @@
 # This is a part of Esotope Brainfuck-to-C Compiler.
 
-__all__ = ['Expr']
-
 _EXPRNEG = '_'
 _EXPRREF = '@'
 _EXPRADD = '+'
@@ -18,6 +16,13 @@ class _ExprMeta(type):
 class Expr(object):
     __metaclass__ = _ExprMeta
     __slots__ = ['code']
+
+    NEG = _EXPRNEG
+    REF = _EXPRREF
+    ADD = _EXPRADD
+    MUL = _EXPRMUL
+    DIV = _EXPRDIV
+    MOD = _EXPRMOD
 
     def __init__(self, obj=0):
         if isinstance(obj, (int, long)):
@@ -283,10 +288,6 @@ class Expr(object):
         newcode.extend(code[lastref:])
         return Expr(self._simplify(newcode))
 
-    def __str__(self):
-        self.code = self._simplify(self.code)
-        return repr(self)
-
     def __repr__(self):
         stack = []
         for c in self.code:
@@ -295,7 +296,7 @@ class Expr(object):
                 stack.append('-%s' % arg)
             elif c is _EXPRREF:
                 arg = stack.pop()
-                stack.append('p[%s]' % arg)
+                stack.append('{%s}' % arg)
             elif c is _EXPRADD:
                 rhs = stack.pop(); lhs = stack.pop()
                 if rhs.startswith('-'):

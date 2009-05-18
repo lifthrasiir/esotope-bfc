@@ -8,29 +8,6 @@ from bfc.expr import *
 from bfc.cond import *
 from bfc.codegen import Generator
 
-def _formatadjust(ref, value):
-    if isinstance(value, (int, long)) or value.simple():
-        value = int(value)
-        if value == 0:
-            return ''
-        elif value == 1:
-            return '++%s' % ref
-        elif value == -1:
-            return '--%s' % ref
-
-    s = str(value)
-    if s.startswith('-'):
-        return '%s -= %s' % (ref, s[1:])
-    else:
-        return '%s += %s' % (ref, s)
-
-_reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
-_reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
-_reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
-def _addslashes(s):
-    return ''.join(_reprmap[ord(i)] for i in s)
-
-
 class CGenerator(Generator):
     def __init__(self, compiler):
         Generator.__init__(self, compiler)
@@ -71,6 +48,75 @@ class CGenerator(Generator):
 
     ############################################################
 
+    def generateexpr(self, expr):
+        if isinstance(expr, (int, long)): return str(expr)
+
+        stack = []
+        for c in expr._simplify(expr.code):
+            if c is Expr.NEG:
+                arg = stack.pop()
+                stack.append('-%s' % arg)
+            elif c is Expr.REF:
+                arg = stack.pop()
+                stack.append('p[%s]' % arg)
+            elif c is Expr.ADD:
+                rhs = stack.pop(); lhs = stack.pop()
+                if rhs.startswith('-'):
+                    stack.append('(%s%s)' % (lhs, rhs))
+                else:
+                    stack.append('(%s+%s)' % (lhs, rhs))
+            elif c is Expr.MUL:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s*%s)' % (lhs, rhs))
+            elif c is Expr.DIV:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s/%s)' % (lhs, rhs))
+            elif c is Expr.MOD:
+                rhs = stack.pop(); lhs = stack.pop()
+                stack.append('(%s%%%s)' % (lhs, rhs))
+            else:
+                stack.append(str(c))
+        return stack[-1]
+
+    def generatecond(self, cond):
+        if isinstance(cond, Always):
+            return '1'
+        elif isinstance(cond, Never):
+            return '0'
+        elif isinstance(cond, MemNotEqual):
+            if cond.value == 0:
+                return 'p[%d]' % cond.target
+            else:
+                return 'p[%d] != %d' % (cond.target, cond.value)
+        elif isinstance(cond, ExprNotEqual):
+            return '%s != %d' % (self.generateexpr(cond.expr), cond.value)
+        else:
+            assert False
+
+    ############################################################
+
+    def _formatadjust(self, ref, value):
+        if isinstance(value, (int, long)) or value.simple():
+            value = int(value)
+            if value == 0:
+                return ''
+            elif value == 1:
+                return '++%s' % ref
+            elif value == -1:
+                return '--%s' % ref
+
+        s = self.generateexpr(value)
+        if s.startswith('-'):
+            return '%s -= %s' % (ref, s[1:])
+        else:
+            return '%s += %s' % (ref, s)
+
+    _reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
+    _reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
+    _reprmap[34] = '\\"'; _reprmap[39] = '\''; _reprmap[92] = '\\\\'
+    def _addslashes(self, s, _reprmap=_reprmap):
+        return ''.join(_reprmap[ord(i)] for i in s)
+
     def generate_Program(self, node):
         self.getcused = self.putcused = self.putsused = False
         self.write('static uint%d_t m[30000], *p = m;' % self.cellsize)
@@ -103,38 +149,38 @@ class CGenerator(Generator):
         pass # do nothing
 
     def generate_SetMemory(self, node):
-        self.write('p[%d] = %s;' % (node.offset, node.value))
+        self.write('p[%d] = %s;' % (node.offset, self.generateexpr(node.value)))
 
     def generate_AdjustMemory(self, node):
-        stmt = _formatadjust('p[%s]' % node.offset, node.delta)
+        stmt = self._formatadjust('p[%d]' % node.offset, node.delta)
         if stmt: self.write(stmt + ';')
 
     def generate_MovePointer(self, node):
-        stmt = _formatadjust('p', node.offset)
+        stmt = self._formatadjust('p', node.offset)
         if stmt: self.write(stmt + ';')
 
     def generate_Input(self, node):
         self.getcused = True
-        self.write('p[%s] = GETC();' % node.offset)
+        self.write('p[%d] = GETC();' % node.offset)
 
     def generate_Output(self, node):
         self.putcused = True
-        self.write('PUTC(%s);' % node.expr)
+        self.write('PUTC(%s);' % self.generateexpr(node.expr))
 
     def generate_OutputConst(self, node):
         self.putsused = True
         for line in node.str.splitlines(True):
-            self.write('PUTS("%s");' % _addslashes(line))
+            self.write('PUTS("%s");' % self._addslashes(line))
 
     def generate_SeekMemory(self, node):
-        accumstmt = _formatadjust('p', node.stride)
-        self.write('while (p[%d] != %s) %s;' % (node.target, node.value, accumstmt))
+        self.write('while (p[%d] != %d) %s;' % (node.target, node.value,
+                self._formatadjust('p', node.stride)))
 
     def generate_If(self, node):
         if self.debugging:
             self.dumpcomplex(self)
 
-        self.write('if (%s) {' % node.cond)
+        self.write('if (%s) {' % self.generatecond(node.cond))
         self._generatenested(node)
         self.write('}')
 
@@ -148,7 +194,8 @@ class CGenerator(Generator):
             self.dumpcomplex(self)
 
         var = self.newvariable('loopcnt')
-        self.write('for (%s = %s; %s > 0; --%s) {' % (var, count, var, var))
+        self.write('for (%s = %s; %s > 0; --%s) {' %
+                (var, self.generateexpr(count), var, var))
         self._generatenested(node)
         self.write('}')
 
@@ -159,7 +206,7 @@ class CGenerator(Generator):
         if isinstance(node.cond, Always) and len(self) == 0:
             self.write('while (1); /* infinite loop */')
         else:
-            self.write('while (%s) {' % node.cond)
+            self.write('while (%s) {' % self.generatecond(node.cond))
             self._generatenested(node)
             self.write('}')
 

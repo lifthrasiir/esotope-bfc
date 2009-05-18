@@ -234,7 +234,7 @@ class SetMemory(Node):
     postupdates = preupdates
 
     def __repr__(self):
-        return '%d=%r' % (self.offset, self.value)
+        return '{%d}=%r' % (self.offset, self.value)
 
 class AdjustMemory(Node):
     def __init__(self, offset, delta):
@@ -261,9 +261,9 @@ class AdjustMemory(Node):
 
     def __repr__(self):
         if self.delta < 0:
-            return '%d-=%r' % (self.offset, -self.delta)
+            return '{%d}-=%r' % (self.offset, -self.delta)
         else:
-            return '%d+=%r' % (self.offset, self.delta)
+            return '{%d}+=%r' % (self.offset, self.delta)
 
 class MovePointer(Node):
     def __init__(self, offset):
@@ -279,7 +279,7 @@ class MovePointer(Node):
         return self.offset
 
     def __repr__(self):
-        return '@%r' % self.offset
+        return 'MovePointer[%r]' % self.offset
 
 class Input(Node):
     def __init__(self, offset):
@@ -357,9 +357,9 @@ class SeekMemory(Node):
 
     def __repr__(self):
         if self.target == 0:
-            return 'SeekMemory[p[%r*k]!=%r]' % (self.stride, self.value)
+            return 'SeekMemory[{%r*k}!=%r]' % (self.stride, self.value)
         else:
-            return 'SeekMemory[p[%d+%r*k]!=%r] @%d' % \
+            return 'SeekMemory[{%d+%r*k}!=%r]' % \
                     (self.target, self.stride, self.value, self.target)
 
 class If(ComplexNode):
