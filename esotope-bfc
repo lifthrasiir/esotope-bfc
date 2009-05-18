@@ -66,10 +66,8 @@ def main(argv):
     else:
         fp = open(args[0], 'r')
 
-    compiler = Compiler(cellsize=cellsize)
-    node = compiler.parse(fp)
-    node = compiler.optimize(node)
-    compiler.emit(node, debugging)
+    compiler = Compiler(cellsize=cellsize, debugging=debugging)
+    compiler.compile(fp)
     return 0
 
 if __name__ == '__main__':
