@@ -24,14 +24,10 @@ class Compiler(object):
 
     def parse(self, fp):
         nodestack = [Program()]
-
-        def flush(parent, changes, offset):
-            for k, v in changes.items():
-                if v != 0: parent.append(AdjustMemory(k, v))
-            if offset != 0: parent.append(MovePointer(offset))
+        offsetstack = [0]
 
         changes = {}
-        offset = 0
+        offset = offsetbase = 0
         for lineno, line in enumerate(fp):
             for ch in line:
                 if ch == '+':
@@ -43,23 +39,31 @@ class Compiler(object):
                 elif ch == '<':
                     offset -= 1
                 elif ch in '.,[]':
-                    flush(nodestack[-1], changes, offset)
+                    for k, v in changes.items():
+                        if v != 0: nodestack[-1].append(AdjustMemory(k, v))
                     changes = {}
-                    offset = 0
 
                     if ch == '.':
-                        nodestack[-1].append(Output(Expr[0]))
+                        nodestack[-1].append(Output(Expr[offset]))
                     elif ch == ',':
-                        nodestack[-1].append(Input(0))
+                        nodestack[-1].append(Input(offset))
                     elif ch == '[':
-                        nodestack.append(While())
-                    else:
+                        nodestack.append(While(MemNotEqual(offset, 0)))
+                        offsetstack.append(offsetbase)
+                        offsetbase = offset
+                    else: # ch == ']'
                         if len(nodestack) < 2:
                             raise ValueError('Not matching ] at line %d' % (lineno+1))
+                        if offset != offsetbase: # unbalanced loop
+                            nodestack[-1].append(MovePointer(offset - offsetbase))
+
+                        offset = offsetbase
                         loop = nodestack.pop()
+                        offsetbase = offsetstack.pop()
                         nodestack[-1].append(loop)
 
-        flush(nodestack[-1], changes, offset)
+        for k, v in changes.items():
+            if v != 0: nodestack[-1].append(AdjustMemory(k, v))
         if len(nodestack) != 1:
             raise ValueError('Premature end of the loop')
         return nodestack[0]

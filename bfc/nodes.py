@@ -296,7 +296,7 @@ class Input(Node):
     postupdates = preupdates
 
     def __repr__(self):
-        return 'Input[%r]' % self.offset
+        return '{%r}=Input[]' % self.offset
 
 class Output(Node):
     def __init__(self, expr):
@@ -464,12 +464,9 @@ class Repeat(ComplexNode):
         return 'Repeat[%r; %s]' % (self.count, ComplexNode.__repr__(self)[1:-1])
 
 class While(ComplexNode):
-    def __init__(self, cond=None, children=[]):
+    def __init__(self, cond, children=[]):
         ComplexNode.__init__(self, children)
-        if cond is None:
-            self.cond = MemNotEqual(0, 0)
-        else:
-            self.cond = cond
+        self.cond = cond
 
     def __nonzero__(self):
         # infinite loop should return True, even if there are no children.

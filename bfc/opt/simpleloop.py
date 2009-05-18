@@ -38,8 +38,8 @@ class SimpleLoopPass(OptimizerPass):
             target = cur.cond.target
             value = cur.cond.value
 
-            if target == 0 and len(cur) == 1 and isinstance(cur[0], MovePointer):
-                tr.replace(SeekMemory(0, cur[0].offset, value))
+            if len(cur) == 1 and isinstance(cur[0], MovePointer):
+                tr.replace(SeekMemory(target, cur[0].offset, value))
                 continue
 
             if cur.offsets() != 0: continue
