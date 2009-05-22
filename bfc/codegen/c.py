@@ -203,7 +203,7 @@ class CGenerator(Generator):
         if self.debugging:
             self.dumpcomplex(self)
 
-        if isinstance(node.cond, Always) and len(self) == 0:
+        if isinstance(node.cond, Always) and len(node) == 0:
             self.write('while (1); /* infinite loop */')
         else:
             self.write('while (%s) {' % self.generatecond(node.cond))

@@ -358,9 +358,10 @@ class SeekMemory(Node):
     def __repr__(self):
         if self.target == 0:
             return 'SeekMemory[{%r*k}!=%r]' % (self.stride, self.value)
+        elif self.stride < 0:
+            return 'SeekMemory[{%d-%r*k}!=%r]' % (self.target, -self.stride, self.value)
         else:
-            return 'SeekMemory[{%d+%r*k}!=%r]' % \
-                    (self.target, self.stride, self.value, self.target)
+            return 'SeekMemory[{%d+%r*k}!=%r]' % (self.target, self.stride, self.value)
 
 class If(ComplexNode):
     def __init__(self, cond=None, children=[]):

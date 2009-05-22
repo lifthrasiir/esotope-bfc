@@ -1,4 +1,11 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
+# This is a part of Esotope Brainfuck compiler.
+
+"""Provides the expression class and canonicalization routines.
+
+The expression in the Brainfuck IL is defined as a set of pure (no I/O),
+non-destructive (no memory write) operations. In C terminology the expression
+represents r-value. It still references the outside memory and variables.
+"""
 
 _EXPRNEG = '_'
 _EXPRREF = '@'
