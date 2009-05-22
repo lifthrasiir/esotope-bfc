@@ -230,10 +230,22 @@ class ComplexNode(Node, list):
         return list.__repr__(self)
 
 class Program(ComplexNode):
+    """Program node.
+    
+    Program[...] represents the entire program, including any necessary setups
+    for Brainfuck program.
+    """
+
     def __repr__(self):
         return 'Program[%s]' % ComplexNode.__repr__(self)[1:-1]
 
 class Nop(Node):
+    """Nop node.
+
+    Nop[] is a designated no-op node, used as a placeholder and later removed
+    by cleanup pass.
+    """
+
     def __nonzero__(self):
         return False
 
@@ -241,6 +253,16 @@ class Nop(Node):
         return 'Nop[]'
 
 class SetMemory(Node):
+    """SetMemory node.
+
+    SetMemory[offset, value], or {offset}=value in the compact notation,
+    represents that the memory cell at the offset (relative to the current
+    pointer) is set to given value (possibly an expression).
+
+    SetMemory is one of two memory operations in the Brainfuck IL. The other
+    one is AdjustMemory.
+    """
+
     def __init__(self, offset, value):
         self.offset = offset
         self.value = Expr(value)
@@ -264,6 +286,17 @@ class SetMemory(Node):
         return '{%d}=%r' % (self.offset, self.value)
 
 class AdjustMemory(Node):
+    """AdjustMemory node.
+
+    AdjustMemory[offset, value], or {offset}+=value and {offset}-=value in the
+    compact notation, is equivalent to {offset}={offset}+value and {offset}=
+    {offset}-value respectively.
+
+    AdjustMemory is added for convenience, as current canonicalization routine
+    cannot handle complex expression like ({x}+v)-{x}. We plan to improve the
+    canonicalization routine thus remove the need for AdjustMemory entirely.
+    """
+
     def __init__(self, offset, delta):
         self.offset = offset
         self.delta = Expr(delta)
@@ -293,6 +326,13 @@ class AdjustMemory(Node):
             return '{%d}+=%r' % (self.offset, self.delta)
 
 class MovePointer(Node):
+    """MovePointer node.
+
+    MovePointer[offset] represents the pointer movement by given offset. It is
+    relatively rare, as the parser already propagated almost all < and >
+    commands except at the end of the loop.
+    """
+
     def __init__(self, offset):
         self.offset = offset
 
@@ -309,6 +349,14 @@ class MovePointer(Node):
         return 'MovePointer[%r]' % self.offset
 
 class Input(Node):
+    """Input node.
+
+    {offset}=Input[] reads one byte from the input and stores it to given
+    memory cell. Despite the notation, it cannot be merged to the expression
+    since I/O should not be reordered. (For example, if Input[] appears in
+    the expression how to interpret "{x}=Input[]+Input[]*2"?)
+    """
+
     def __init__(self, offset):
         self.offset = offset
 
@@ -326,6 +374,14 @@ class Input(Node):
         return '{%r}=Input[]' % self.offset
 
 class Output(Node):
+    """Output node.
+
+    Output[expr] writes one byte, typically calculated by expr modulo 256, to
+    the output. Like Input[] it cannot be reordered.
+
+    There is OutputConst[...] node for printing many constant characters.
+    """
+
     def __init__(self, expr):
         self.expr = expr
 
@@ -346,6 +402,13 @@ class Output(Node):
         return 'Output[%r]' % self.expr
 
 class OutputConst(Node):
+    """OutputConst node.
+
+    OutputConst["string"] writes "string" to the output. It is equivalent to
+    Output[ord(string[0])], Output[ord(string[1])], ... and produced by stdlib
+    pass at the very end of optimization.
+    """
+
     def __init__(self, s):
         if isinstance(s, str):
             self.str = s
@@ -365,6 +428,16 @@ class OutputConst(Node):
         return 'OutputConst[%r]' % self.str
 
 class SeekMemory(Node):
+    """SeekMemory node.
+
+    SeekMemory[{p+q*k}!=x] seeks the memory cell {p}, {p+q}, {p+2*q}, ... and
+    determintes the first one which value is not equal to x. It then moves the
+    current pointer by q*k, so that {p} is guaranteed to be not equal to x.
+
+    It is equal to While[{p}!=x; MovePointer[q]], but it is very common array
+    operation so treated specially.
+    """
+
     def __init__(self, target, stride, value=0):
         self.target = target
         self.stride = stride
@@ -391,6 +464,13 @@ class SeekMemory(Node):
             return 'SeekMemory[{%d+%r*k}!=%r]' % (self.target, self.stride, self.value)
 
 class If(ComplexNode):
+    """If node.
+
+    If[cond; ...] is the conditional node which executes its body if the given
+    condition holds. Some If[] nodes are equivalent to While[] node, but If[]
+    allows arbitrary condition.
+    """
+
     def __init__(self, cond=None, children=[]):
         ComplexNode.__init__(self, children)
         if cond is None:
@@ -437,6 +517,12 @@ class If(ComplexNode):
         return 'If[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
 
 class Repeat(ComplexNode):
+    """Repeat node.
+
+    Repeat[count; ...] executes its body count times. Count can be an
+    expression, but only evaluated once before the loop.
+    """
+
     def __init__(self, count, children=[]):
         ComplexNode.__init__(self, children)
         self.count = Expr(count)
@@ -492,6 +578,13 @@ class Repeat(ComplexNode):
         return 'Repeat[%r; %s]' % (self.count, ComplexNode.__repr__(self)[1:-1])
 
 class While(ComplexNode):
+    """While node.
+
+    While[cond; ...] executes its body repeatedly until the condition holds.
+    This is a basic, and only form of control flow in Brainfuck; every other
+    construct is converted from this node.
+    """
+
     def __init__(self, cond, children=[]):
         ComplexNode.__init__(self, children)
         self.cond = cond
