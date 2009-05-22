@@ -334,7 +334,7 @@ class Expr(object):
         newcode.extend(code[lastref:])
         return Expr(self._simplify(newcode))
 
-    def __repr__(self):
+    def compactrepr(self):
         stack = []
         for c in self.code:
             if c is _EXPRNEG:
@@ -361,4 +361,7 @@ class Expr(object):
             else:
                 stack.append(str(c))
         return stack[-1]
+
+    def __repr__(self):
+        return '<Expr: %s>' % self.compactrepr()
 

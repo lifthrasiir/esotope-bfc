@@ -14,12 +14,18 @@ class Condition(object):
     def movepointer(self, offset): return self
     def withmemory(self, map): return self
 
+    def compactrepr(self):
+        raise RuntimeError('not implemented')
+
+    def __repr__(self):
+        return '<Cond: %s>' % self.compactrepr()
+
 class Always(Condition):
-    def __repr__(self): return 'True'
+    def compactrepr(self): return 'True'
 
 class Never(Condition):
     def __nonzero__(self): return False
-    def __repr__(self): return 'False'
+    def compactrepr(self): return 'False'
 
 class MemNotEqual(Condition):
     def __init__(self, target, value=0):
@@ -41,7 +47,7 @@ class MemNotEqual(Condition):
         except KeyError:
             return self
 
-    def __repr__(self):
+    def compactrepr(self):
         if self.value == 0:
             return '{%r}' % self.target
         else:
@@ -68,6 +74,6 @@ class ExprNotEqual(Condition):
         else:
             return ExprNotEqual(expr, self.value)
 
-    def __repr__(self):
+    def compactrepr(self):
         return '%r!=%r' % (self.expr, self.value)
 

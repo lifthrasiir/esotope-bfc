@@ -159,6 +159,12 @@ class Node(object):
     # returns False if this node is an infinite loop.
     def returns(self): return True
 
+    def compactrepr(self):
+        raise RuntimeError('not implemented')
+
+    def __repr__(self):
+        return self.compactrepr()
+
 class ComplexNode(Node, list):
     def empty(self):
         return len(self) > 0
@@ -226,8 +232,8 @@ class ComplexNode(Node, list):
             updates |= child.postupdates().movepointer(offsets)
         return updates
 
-    def __repr__(self):
-        return list.__repr__(self)
+    def _innerrepr(self):
+        return ', '.join(child.compactrepr() for child in self)
 
 class Program(ComplexNode):
     """Program node.
@@ -236,8 +242,8 @@ class Program(ComplexNode):
     for Brainfuck program.
     """
 
-    def __repr__(self):
-        return 'Program[%s]' % ComplexNode.__repr__(self)[1:-1]
+    def compactrepr(self):
+        return 'Program[%s]' % self._innerrepr()
 
 class Nop(Node):
     """Nop node.
@@ -249,7 +255,7 @@ class Nop(Node):
     def __nonzero__(self):
         return False
 
-    def __repr__(self):
+    def compactrepr(self):
         return 'Nop[]'
 
 class SetMemory(Node):
@@ -282,8 +288,11 @@ class SetMemory(Node):
         return cellset(sure=[self.offset])
     postupdates = preupdates
 
+    def compactrepr(self):
+        return '{%d}=%s' % (self.offset, self.value.compactrepr())
+
     def __repr__(self):
-        return '{%d}=%r' % (self.offset, self.value)
+        return 'SetMemory[%d, %s]' % (self.offset, self.value.compactrepr())
 
 class AdjustMemory(Node):
     """AdjustMemory node.
@@ -319,11 +328,14 @@ class AdjustMemory(Node):
         return cellset(sure=[self.offset])
     postupdates = preupdates
 
-    def __repr__(self):
+    def compactrepr(self):
         if self.delta < 0:
-            return '{%d}-=%r' % (self.offset, -self.delta)
+            return '{%d}-=%s' % (self.offset, (-self.delta).compactrepr())
         else:
-            return '{%d}+=%r' % (self.offset, self.delta)
+            return '{%d}+=%s' % (self.offset, self.delta.compactrepr())
+
+    def __repr__(self):
+        return 'AdjustMemory[%d, %s]' % (self.offset, self.delta.compactrepr())
 
 class MovePointer(Node):
     """MovePointer node.
@@ -345,8 +357,8 @@ class MovePointer(Node):
     def offsets(self):
         return self.offset
 
-    def __repr__(self):
-        return 'MovePointer[%r]' % self.offset
+    def compactrepr(self):
+        return 'MovePointer[%d]' % self.offset
 
 class Input(Node):
     """Input node.
@@ -370,8 +382,8 @@ class Input(Node):
         return cellset(sure=[self.offset])
     postupdates = preupdates
 
-    def __repr__(self):
-        return '{%r}=Input[]' % self.offset
+    def compactrepr(self):
+        return '{%d}=Input[]' % self.offset
 
 class Output(Node):
     """Output node.
@@ -398,8 +410,8 @@ class Output(Node):
     def movepointer(self, offset):
         self.expr = self.expr.movepointer(offset)
 
-    def __repr__(self):
-        return 'Output[%r]' % self.expr
+    def compactrepr(self):
+        return 'Output[%s]' % self.expr.compactrepr()
 
 class OutputConst(Node):
     """OutputConst node.
@@ -424,7 +436,7 @@ class OutputConst(Node):
     def movepointer(self, offset):
         pass # does nothing
 
-    def __repr__(self):
+    def compactrepr(self):
         return 'OutputConst[%r]' % self.str
 
 class SeekMemory(Node):
@@ -455,13 +467,13 @@ class SeekMemory(Node):
     def postreferences(self):
         return cellset(sure=[self.target], others=False)
 
-    def __repr__(self):
+    def compactrepr(self):
         if self.target == 0:
-            return 'SeekMemory[{%r*k}!=%r]' % (self.stride, self.value)
+            return 'SeekMemory[{%d*k}!=%d]' % (self.stride, self.value)
         elif self.stride < 0:
-            return 'SeekMemory[{%d-%r*k}!=%r]' % (self.target, -self.stride, self.value)
+            return 'SeekMemory[{%d-%d*k}!=%d]' % (self.target, -self.stride, self.value)
         else:
-            return 'SeekMemory[{%d+%r*k}!=%r]' % (self.target, self.stride, self.value)
+            return 'SeekMemory[{%d+%d*k}!=%d]' % (self.target, self.stride, self.value)
 
 class If(ComplexNode):
     """If node.
@@ -513,8 +525,8 @@ class If(ComplexNode):
     def postupdates(self):
         return cellset(unsure=self.bodypostupdates().unsure)
 
-    def __repr__(self):
-        return 'If[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
+    def compactrepr(self):
+        return 'If[%s; %s]' % (self.cond.compactrepr(), self._innerrepr())
 
 class Repeat(ComplexNode):
     """Repeat node.
@@ -574,8 +586,8 @@ class Repeat(ComplexNode):
             bodyupdates.addunsure(None)
         return bodyupdates
 
-    def __repr__(self):
-        return 'Repeat[%r; %s]' % (self.count, ComplexNode.__repr__(self)[1:-1])
+    def compactrepr(self):
+        return 'Repeat[%s; %s]' % (self.count.compactrepr(), self._innerrepr())
 
 class While(ComplexNode):
     """While node.
@@ -641,6 +653,6 @@ class While(ComplexNode):
     def returns(self):
         return not isinstance(self.cond, Always)
 
-    def __repr__(self):
-        return 'While[%r; %s]' % (self.cond, ComplexNode.__repr__(self)[1:-1])
+    def compactrepr(self):
+        return 'While[%s; %s]' % (self.cond.compactrepr(), self._innerrepr())
 
