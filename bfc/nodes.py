@@ -1,9 +1,19 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
+# This is a part of Esotope Brainfuck compiler.
+
+"""The Brainfuck IL (intermediate language).
+
+Brainfuck IL is an internal representation of source code in Esotope compiler.
+It depends on the expression (bfc.expr module) and condition (bfc.cond module)
+objects.
+"""
 
 from bfc.expr import *
 from bfc.cond import *
 
 def _setmovepointer(cells, offset):
+    """Adds given offset to every elements in cells, except for None (normally
+    represents "one or more other cells")."""
+
     result = [i + offset for i in cells if i is not None]
     if None in cells: result.append(None)
     return set(result)
@@ -100,17 +110,34 @@ class cellset(object):
 
 
 class Node(object):
-    # returns False if it is a no-op. cleanup pass will remove such no-ops.
-    def __nonzero__(self): return True
+    """Base class of the Brainfuck IL."""
 
-    # returns False if it does an input or output, thus cannot be reordered.
-    def pure(self): return True
+    def __nonzero__(self):
+        """node.__nonzero__() -> bool
 
-    # moves all memory references in it by offset.
-    def movepointer(self, offset): raise RuntimeError('not implemented')
+        Should return False if it is a unconditionally no-op."""
+
+        return True
+
+    def pure(self):
+        """node.pure() -> bool
+
+        Should return False if it does any input or output, thus cannot be
+        reordered. This includes any loop contains I/O node."""
+
+        return True
+
+    def movepointer(self, offset):
+        """node.movepointer(offset) -> None
+
+        Moves all memory references in the node by given offset. This is an
+        in-place operation."""
+
+        raise RuntimeError('not implemented')
 
     # propagates known memory cells given.
-    def withmemory(self, map): pass
+    def withmemory(self, map):
+        pass
 
     # a set of offset to memory cells which may be referenced/updated by
     # this node, relative to initial pointer before execution.

@@ -17,10 +17,28 @@ _EXPRARITYMAP = {_EXPRNEG: 1, _EXPRREF: 1, _EXPRADD: 2, _EXPRMUL: 2,
                  _EXPRDIV: 2, _EXPRMOD: 2}
 
 class _ExprMeta(type):
+    """Metaclass of Expr. Used to implement Expr[] syntax."""
+
     def __getitem__(self, offset):
+        """Expr[offset] -> Expr object
+
+        Makes the expression represents memory reference. offset is relative
+        to (implicit) current pointer."""
+
         return Expr(Expr(offset).code + [_EXPRREF])
 
 class Expr(object):
+    """Expression class with canonicalization.
+
+    Expression is extensively used in the Brainfuck IL, as it is a lot readable
+    in the output than a set of operations, and easier to implement certain
+    operations. Expression is immutable, but could be internally canonicalized.
+    
+    Internally expression is stored as the postfix notation, where number
+    represents the leaf node for number, string is for the operation (like
+    _EXPRNEG, _EXPRREF, _EXPRADD etc.), and tuple is for extensions (not used
+    yet). Arity of operators is implicit and defined in _EXPRARITYMAP."""
+
     __metaclass__ = _ExprMeta
     __slots__ = ['code']
 
@@ -32,6 +50,15 @@ class Expr(object):
     MOD = _EXPRMOD
 
     def __init__(self, obj=0):
+        """Expr(number=0) -> number
+        Expr(code) -> Expr
+        Expr(exprobj) -> copy of exprobj
+
+        Creates the new expression object: normally it is used to create
+        an expression for a number (provide the number to the argument).
+        If the argument is not a number, it copies given internal notation
+        or object and creates the clone."""
+
         if isinstance(obj, (int, long)):
             self.code = [obj]
         else:
@@ -39,18 +66,30 @@ class Expr(object):
             self.code = obj[:]
 
     def __nonzero__(self):
+        """expr.__nonzero__() -> bool
+
+        Expression is non-zero if and only if the internal representation is
+        not equal to 0. Non-canonical expression like "{0}-{0}" is also non-zero.
+        """
+
         return (self != 0)
 
     def __neg__(self):
+        """-expr -> Expr"""
+
         code = self.code
         if len(code) == 1: return Expr(-code[0])
         if code[-1] is _EXPRNEG: return Expr(code[:-1])
         return Expr(code + [_EXPRNEG])
 
     def __pos__(self):
+        """+expr -> expr"""
+
         return self
 
     def __add__(lhs, rhs):
+        """lhsexpr + rhsexpr -> Expr"""
+
         lhscode = lhs.code
         rhscode = Expr(rhs).code
         if len(lhscode) == 1:

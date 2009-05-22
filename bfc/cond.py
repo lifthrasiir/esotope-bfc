@@ -1,4 +1,10 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
+# This is a part of Esotope Brainfuck compiler.
+
+"""The condition objects.
+
+Condition object is an extension to expression: it provides comparison
+operator. It is used in While and If nodes in the Brainfuck IL.
+"""
 
 from bfc.expr import *
 
