@@ -6,11 +6,11 @@ import cStringIO as stringio
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
-from bfc.codegen import Generator
+from bfc.codegen import BaseGenerator
 
-class CGenerator(Generator):
+class Generator(BaseGenerator):
     def __init__(self, compiler):
-        Generator.__init__(self, compiler)
+        BaseGenerator.__init__(self, compiler)
         self.declbuf = stringio.StringIO()
         self.buf = stringio.StringIO()
         self.nextvars = {} 

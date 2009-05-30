@@ -5,8 +5,6 @@ from bfc.expr import *
 from bfc.cond import *
 
 from bfc.opt import flatten, initialmemory, propagate, removedead, simpleloop, stdlib
-from bfc.parser import brainfuck
-from bfc.codegen import c as codegen_c
 
 class Compiler(object):
     """Compiler class.
@@ -16,15 +14,16 @@ class Compiler(object):
     interested in the internal workings, this class should be sufficient.
     """
 
-    def __init__(self, cellsize=8, debugging=False):
-        """Compiler(cellsize=8, debugging=False) -> Compiler object
+    def __init__(self, parser, codegen, cellsize=8, debugging=False):
+        """Compiler(parser, codegen, cellsize=8, debugging=False) -> Compiler object
 
-        Creates Compiler object with given Brainfuck environment. cellsize
-        should be 8 (default), 16 or 32. debugging can be set to True in order
-        to generate more verbose output."""
+        Creates Compiler object with given Brainfuck environment. parser and
+        codegen should be the class subclassed from (respectively) BaseParser and
+        BaseGenerator class. cellsize should be 8 (default), 16 or 32. debugging
+        can be set to True in order to generate more verbose output."""
 
         self.cellsize = cellsize
-        self.parser = brainfuck.Parser
+        self.parser = parser
         self.optpasses = [
             flatten.FlattenPass,
             simpleloop.SimpleLoopPass,
@@ -35,7 +34,7 @@ class Compiler(object):
             removedead.RemoveDeadPass,
             stdlib.StdlibPass,
         ]
-        self.codegen = codegen_c.CGenerator
+        self.codegen = codegen
         self.debugging = debugging
 
     def parse(self, fp):

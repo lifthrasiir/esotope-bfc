@@ -2,7 +2,7 @@
 
 import bfc.nodes
 
-class Generator(object):
+class BaseGenerator(object):
     def __init__(self, compiler):
         self.compiler = compiler
         self.nindents = 0
