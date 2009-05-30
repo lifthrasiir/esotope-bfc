@@ -1,22 +1,20 @@
-# This is a part of Esotope Brainfuck compiler.
-
-"""The compiler class.
-
-This class provides the basic interface to parser, optimizer and code
-generator. If you are not interested in the internal workings, Compiler
-class should be sufficient.
-"""
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import initialmemory, propagate, removedead, simpleloop, stdlib
+from bfc.opt import flatten, initialmemory, propagate, removedead, simpleloop, stdlib
+from bfc.parser import brainfuck
 from bfc.codegen import c as codegen_c
 
 class Compiler(object):
-    """Compiler class. It provides the optimizing parser (via parse method),
-    and abstracts the optimizer passes and code generators."""
+    """Compiler class.
+    
+    It connects parser, optimizer passes and code generator into single
+    interface, and provides a shared configuration namespace. If you are not
+    interested in the internal workings, this class should be sufficient.
+    """
 
     def __init__(self, cellsize=8, debugging=False):
         """Compiler(cellsize=8, debugging=False) -> Compiler object
@@ -26,7 +24,9 @@ class Compiler(object):
         to generate more verbose output."""
 
         self.cellsize = cellsize
+        self.parser = brainfuck.Parser
         self.optpasses = [
+            flatten.FlattenPass,
             simpleloop.SimpleLoopPass,
             initialmemory.InitialMemoryPass,
             propagate.PropagatePass,
@@ -39,61 +39,8 @@ class Compiler(object):
         self.debugging = debugging
 
     def parse(self, fp):
-        """compiler.parse(filelike) -> Program node
-
-        Creates the Program node corresponding to the given program. Unmatched
-        bracket is checked, and all non-command character is ignored. (`#`, `!`
-        or similar things are not supported yet.)
-
-        This method tries to generate the smaller node as much as possible. All
-        memory operation is pointer-propagated, and almost all pointer operation
-        is vanished (except for one at the very end of loop).
-        """
-
-        nodestack = [Program()]
-        offsetstack = [0]
-
-        changes = {}
-        offset = offsetbase = 0
-        for lineno, line in enumerate(fp):
-            for ch in line:
-                if ch == '+':
-                    changes[offset] = changes.get(offset, 0) + 1
-                elif ch == '-':
-                    changes[offset] = changes.get(offset, 0) - 1
-                elif ch == '>':
-                    offset += 1
-                elif ch == '<':
-                    offset -= 1
-                elif ch in '.,[]':
-                    for k, v in changes.items():
-                        if v != 0: nodestack[-1].append(AdjustMemory(k, v))
-                    changes = {}
-
-                    if ch == '.':
-                        nodestack[-1].append(Output(Expr[offset]))
-                    elif ch == ',':
-                        nodestack[-1].append(Input(offset))
-                    elif ch == '[':
-                        nodestack.append(While(MemNotEqual(offset, 0)))
-                        offsetstack.append(offsetbase)
-                        offsetbase = offset
-                    else: # ch == ']'
-                        if len(nodestack) < 2:
-                            raise ValueError('Not matching ] at line %d' % (lineno+1))
-                        if offset != offsetbase: # unbalanced loop
-                            nodestack[-1].append(MovePointer(offset - offsetbase))
-
-                        offset = offsetbase
-                        loop = nodestack.pop()
-                        offsetbase = offsetstack.pop()
-                        nodestack[-1].append(loop)
-
-        for k, v in changes.items():
-            if v != 0: nodestack[-1].append(AdjustMemory(k, v))
-        if len(nodestack) != 1:
-            raise ValueError('Premature end of the loop')
-        return nodestack[0]
+        parser = self.parser(self)
+        return parser.parse(fp)
 
     def visit(self, node, func):
         """compiler.visit(node, func) -> anything
