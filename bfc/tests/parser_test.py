@@ -67,5 +67,5 @@ class TestBrainfuckParser:
 
     def test_unknown(self):
         assert eq(parse(StringIO('this is\nunknown.')), 'Program[Output[{0}]]')
-        assert eq(parse(StringIO('++ ++')), 'Program[{0}+=4]')
+        assert eq(parse(StringIO('++ ++')), 'Program[{0}+=2, {0}+=2]')
 
