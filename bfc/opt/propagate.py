@@ -1,17 +1,17 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# propagates cell references and constants as much as possible.
-# requires minptrloops pass for optimal processing. otherwise MovePointer
-# will act as memory blocker.
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 from bfc.opt.cleanup import cleanup
 
-class PropagatePass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
+    # propagates cell references and constants as much as possible.
+    # requires minptrloops pass for optimal processing. otherwise MovePointer
+    # will act as memory blocker.
+
     def _transform(self, node):
         backrefs = {}
         usedrefs = {}

@@ -1,11 +1,11 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
+# This is a part of Esotope Brainfuck Compiler.
 
-# extensive loop optimization. it calculates repeat count if possible and
-# tries to convert them into For[].
+from bfc.opt import BaseOptimizerPass, Transformer
 
-from bfc.opt import OptimizerPass, Transformer
+class OptimizerPass(BaseOptimizerPass):
+    # extensive loop optimization. it calculates repeat count if possible and
+    # tries to convert them into For[].
 
-class MoreLoopPass(OptimizerPass):
     def transform(self, node):
         # TODO
         return node

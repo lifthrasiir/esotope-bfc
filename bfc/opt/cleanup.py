@@ -1,23 +1,23 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# general node cleanup routine. it does the following jobs:
-# - removes every no-op nodes, including If[False; ...] and k+=0.
-# - flattens Repeat[num; ...] node with all memory ops to parent.
-# - flattens If[True; ...] node to parent.
-# - merges MovePointer[] nodes as much as possible, and adjusts
-#   other nodes accordingly.
-# - removes every (dead) nodes after non-returning node.
-#
-# this is not recursive, and intended to be called in the end of other
-# optimization passes.
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import Transformer
+from bfc.opt.base import Transformer
 
 def cleanup(node):
+    # general node cleanup routine. it does the following jobs:
+    # - removes every no-op nodes, including If[False; ...] and k+=0.
+    # - flattens Repeat[num; ...] node with all memory ops to parent.
+    # - flattens If[True; ...] node to parent.
+    # - merges MovePointer[] nodes as much as possible, and adjusts
+    #   other nodes accordingly.
+    # - removes every (dead) nodes after non-returning node.
+    #
+    # this is not recursive, and intended to be called in the end of other
+    # optimization passes.
+
     offsets = 0
     tr = Transformer(node)
     for i, cur in tr:

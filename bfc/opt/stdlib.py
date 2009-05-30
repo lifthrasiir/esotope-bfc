@@ -1,15 +1,15 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# converts common idioms to direct C library call.
-# - merges Output[] nodes into OutputConst[] node as much as possible.
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 
-class StdlibPass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
+    # converts common idioms to direct C library call.
+    # - merges Output[] nodes into OutputConst[] node as much as possible.
+
     def _transform(self, node):
         laststr = []
         tr = Transformer(node)

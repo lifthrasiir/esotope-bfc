@@ -1,15 +1,15 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# adds redundant SetMemory nodes for later passes. other passes don't know
-# about initial memory contents, so it has to add such information explicitly.
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 
-class InitialMemoryPass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
+    # adds redundant SetMemory nodes for later passes. other passes don't know
+    # about initial memory contents, so it has to add such information explicitly.
+
     def transform(self, node):
         if not isinstance(node, Program):
             return node

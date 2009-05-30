@@ -1,15 +1,15 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# dead code elimination, sorta. doesn't do so across basic blocks yet.
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 from bfc.opt.cleanup import cleanup
 
-class RemoveDeadPass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
+    # dead code elimination, sorta. doesn't do so across basic blocks yet.
+
     def _transform(self, node):
         unusedcells = {} # cell -> node which last updated this cell
         unusednodes = set()

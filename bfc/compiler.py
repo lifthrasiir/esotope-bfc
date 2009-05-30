@@ -4,7 +4,7 @@ from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import flatten, initialmemory, propagate, removedead, simpleloop, stdlib
+from bfc import opt
 
 class Compiler(object):
     """Compiler class.
@@ -25,14 +25,14 @@ class Compiler(object):
         self.cellsize = cellsize
         self.parser = parser
         self.optpasses = [
-            flatten.FlattenPass,
-            simpleloop.SimpleLoopPass,
-            initialmemory.InitialMemoryPass,
-            propagate.PropagatePass,
-            simpleloop.SimpleLoopPass,
-            propagate.PropagatePass,
-            removedead.RemoveDeadPass,
-            stdlib.StdlibPass,
+            opt.flatten.OptimizerPass,
+            opt.simpleloop.OptimizerPass,
+            opt.initialmemory.OptimizerPass,
+            opt.propagate.OptimizerPass,
+            opt.simpleloop.OptimizerPass,
+            opt.propagate.OptimizerPass,
+            opt.removedead.OptimizerPass,
+            opt.stdlib.OptimizerPass,
         ]
         self.codegen = codegen
         self.debugging = debugging

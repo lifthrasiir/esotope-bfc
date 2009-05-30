@@ -1,18 +1,10 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
-
-# tries to convert various loops into more specific form:
-# - While[p[x]!=v; ...] with offsets=0, which adjusts cell 0 by const amount.
-#   this node will be replaced by Repeat[numrepeat; ...]
-# - While[p[x]!=v; ...] with offsets=0, which sets cell 0 to zero.
-#   this node will be replaced by If[p[x]!=v; ...].
-# - While[p[0]!=v; MovePointer[y]], where y is const.
-#   this nodes will be replaced by SeekMemory[p[y*k]!=v].
+# This is a part of Esotope Brainfuck Compiler.
 
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 from bfc.opt.cleanup import cleanup
 
 def _gcdex(x, y):
@@ -26,7 +18,15 @@ def _gcdex(x, y):
         c = u; d = v
     return (a, b, y)
 
-class SimpleLoopPass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
+    # tries to convert various loops into more specific form:
+    # - While[p[x]!=v; ...] with offsets=0, which adjusts cell 0 by const amount.
+    #   this node will be replaced by Repeat[numrepeat; ...]
+    # - While[p[x]!=v; ...] with offsets=0, which sets cell 0 to zero.
+    #   this node will be replaced by If[p[x]!=v; ...].
+    # - While[p[0]!=v; MovePointer[y]], where y is const.
+    #   this nodes will be replaced by SeekMemory[p[y*k]!=v].
+
     def _transform(self, node):
         overflow = 1 << self.cellsize
 

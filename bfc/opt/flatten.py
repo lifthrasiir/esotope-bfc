@@ -4,9 +4,9 @@ from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
 
-from bfc.opt import OptimizerPass, Transformer
+from bfc.opt.base import BaseOptimizerPass, Transformer
 
-class FlattenPass(OptimizerPass):
+class OptimizerPass(BaseOptimizerPass):
     def _transform(self, node):
         result = []
 

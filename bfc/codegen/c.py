@@ -1,4 +1,4 @@
-# This is a part of Esotope Brainfuck-to-C Compiler.
+# This is a part of Esotope Brainfuck Compiler.
 
 import sys
 import cStringIO as stringio
@@ -6,7 +6,8 @@ import cStringIO as stringio
 from bfc.nodes import *
 from bfc.expr import *
 from bfc.cond import *
-from bfc.codegen import BaseGenerator
+
+from bfc.codegen.base import BaseGenerator
 
 class Generator(BaseGenerator):
     def __init__(self, compiler):
