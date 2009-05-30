@@ -15,41 +15,63 @@ class Parser(BaseParser):
     """
 
     def parse(self, fp):
-        """Creates the Program node corresponding to the given program.
-        Unmatched bracket is checked, and all non-command character is ignored.
-        (`#`, `!` or similar things are not supported yet.)
-
-        This method tries to generate the smaller node as much as possible. All
-        memory operation is pointer-propagated, and almost all pointer operation
-        is vanished (except for one at the very end of loop).
-        """
-
         nodestack = [Program()]
         offsetstack = [0]
 
+        repch = ''
+        repcount = 0
         for lineno, line in enumerate(fp):
             for ch in line:
-                if ch == '+':
-                    nodestack[-1].append(AdjustMemory(0, +1))
-                elif ch == '-':
-                    nodestack[-1].append(AdjustMemory(0, -1))
-                elif ch == '>':
-                    nodestack[-1].append(MovePointer(+1))
-                elif ch == '<':
-                    nodestack[-1].append(MovePointer(-1))
-                elif ch == '.':
-                    nodestack[-1].append(Output(Expr[0]))
-                elif ch == ',':
-                    nodestack[-1].append(Input(0))
-                elif ch == '[':
-                    nodestack.append(While(MemNotEqual(0, 0)))
-                elif ch == ']':
-                    if len(nodestack) < 2:
-                        raise ValueError('Not matching ] at line %d' % (lineno+1))
-                    loop = nodestack.pop()
-                    nodestack[-1].append(loop)
+                if ch == repch:
+                    repcount += 1
                 else:
-                    self.unknown(ch, nodestack)
+                    # merge repeated operations. this is only basic optimization,
+                    # and doesn't account for +- or >< sequences. flatten pass is
+                    # used for that.
+                    #
+                    # the rationale behind this is to preserve the original code
+                    # as much as possible while limiting the memory usage. you can
+                    # recover the original code without comments quickly: for
+                    # example, MovePointer[+3] represents >>> and MovePointer[-2]
+                    # represents <<. even >>><< is represented with two nodes.
+
+                    if repcount > 0:
+                        if repch == '+':
+                            nodestack[-1].append(AdjustMemory(0, +repcount))
+                        elif repch == '-':
+                            nodestack[-1].append(AdjustMemory(0, -repcount))
+                        elif repch == '>':
+                            nodestack[-1].append(MovePointer(+repcount))
+                        elif repch == '<':
+                            nodestack[-1].append(MovePointer(-repcount))
+
+                    repch = ''
+                    if ch in '+-><':
+                        repch = ch
+                        repcount = 1
+                    elif ch == '.':
+                        nodestack[-1].append(Output(Expr[0]))
+                    elif ch == ',':
+                        nodestack[-1].append(Input(0))
+                    elif ch == '[':
+                        nodestack.append(While(MemNotEqual(0, 0)))
+                    elif ch == ']':
+                        if len(nodestack) < 2:
+                            raise ValueError('Not matching ] at line %d' % (lineno+1))
+                        loop = nodestack.pop()
+                        nodestack[-1].append(loop)
+                    else:
+                        self.unknown(ch, nodestack)
+
+        if repcount > 0:
+            if repch == '+':
+                nodestack[-1].append(AdjustMemory(0, +repcount))
+            elif repch == '-':
+                nodestack[-1].append(AdjustMemory(0, -repcount))
+            elif repch == '>':
+                nodestack[-1].append(MovePointer(+repcount))
+            elif repch == '<':
+                nodestack[-1].append(MovePointer(-repcount))
 
         if len(nodestack) != 1:
             raise ValueError('Premature end of the loop')
