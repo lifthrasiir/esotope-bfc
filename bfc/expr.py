@@ -1,11 +1,4 @@
-# This is a part of Esotope Brainfuck compiler.
-
-"""Provides the expression class and canonicalization routines.
-
-The expression in the Brainfuck IL is defined as a set of pure (no I/O),
-non-destructive (no memory write) operations. In C terminology the expression
-represents r-value. It still references the outside memory and variables.
-"""
+# This is a part of Esotope Brainfuck Compiler.
 
 _EXPRNEG = '_'
 _EXPRREF = '@'
@@ -33,7 +26,7 @@ class Expr(object):
     Expression is extensively used in the Brainfuck IL, as it is a lot readable
     in the output than a set of operations, and easier to implement certain
     operations. Expression is immutable, but could be internally canonicalized.
-    
+
     Internally expression is stored as the postfix notation, where number
     represents the leaf node for number, string is for the operation (like
     _EXPRNEG, _EXPRREF, _EXPRADD etc.), and tuple is for extensions (not used
