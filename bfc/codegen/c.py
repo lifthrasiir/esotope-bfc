@@ -78,12 +78,9 @@ class Generator(BaseGenerator):
                 return '(%s)' % terms
 
         if op is Expr.MUL:
-            _, const, terms = code
+            _, terms = code
             terms = '*'.join(map(_generateexpr, terms))
-            if const != 1:
-                return '(%s*%s)' % (const, terms)
-            else:
-                return '(%s)' % terms
+            return '(%s)' % terms
 
         if op is Expr.DIV or op is Expr.EXACTDIV:
             _, lhs, rhs = code

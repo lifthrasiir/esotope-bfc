@@ -52,7 +52,7 @@ class _termsset(dict):
 _EXPRREF = '@' # (_EXPRREF, offset)
 _EXPRVAR = '$' # (_EXPRVAR, name)
 _EXPRADD = '+' # (_EXPRADD, const, {term: coefficient, ...})
-_EXPRMUL = '*' # (_EXPRMUL, const, {term: multiplicity, ...})
+_EXPRMUL = '*' # (_EXPRMUL, {term: multiplicity, ...})
 _EXPRDIV = '//' # (_EXPRDIV, lhs, rhs)
 _EXPREXACTDIV = '/' # (_EXPREXACTDIV, lhs, rhs)
 _EXPRMOD = '%' # (_EXPRMOD, lhs, rhs)
@@ -120,16 +120,12 @@ class Expr(object):
         code = self.code
         if isnumber(code): return Expr(-code)
 
-        if code[0] is _EXPRADD:
+        if code[0] is _EXPRADD: # -(_EXPRADD, ...)
             _, const, terms = code
             negatedterms = _termsset([(k, -v) for k, v in terms.items()])
-            return Expr((_EXPRADD, -code, negatedterms))
+            return Expr((_EXPRADD, -const, negatedterms))
 
-        elif code[0] is _EXPRMUL:
-            _, const, terms = code
-            return Expr((_EXPRMUL, -const, terms))
-
-        # otherwise treat it as (0 - self).
+        # treat it as (0 - self).
         return Expr((_EXPRADD, 0, _termsset([(code, -1)])))
 
     def __pos__(self):
@@ -146,27 +142,41 @@ class Expr(object):
                 return rhs
             elif rhscode[0] is _EXPRADD: # number + (_EXPRADD, ...)
                 _, const, terms = rhscode
-                return Expr((_EXPRADD, lhscode + const, terms))
+                const += lhscode
             else: # number + ...
-                return Expr((_EXPRADD, lhscode, _termsset([(rhscode, 1)])))
+                const = lhscode
+                terms = _termsset([(rhscode, 1)])
 
         elif lhscode[0] is _EXPRADD:
             if isnumber(rhscode): # (_EXPRADD, ...) + number
                 _, const, terms = lhscode
-                return Expr((_EXPRADD, const + rhscode, terms))
+                const += rhscode
             elif rhscode[0] is _EXPRADD: # (_EXPRADD, ...) + (_EXPRADD, ...)
                 _, lconst, lterms = lhscode
                 _, rconst, rterms = rhscode
-                return Expr((_EXPRADD, lconst + rconst, lterms + rterms))
+                const = lconst + rconst
+                terms = lterms + rterms
             else: # (_EXPRADD, ...) + ...
                 _, const, terms = lhscode
                 terms += _termsset([(rhscode, 1)])
-                return Expr((_EXPRADD, const, terms))
 
         elif rhscode == 0: # ... + 0
             return lhs
+        elif isnumber(rhscode): # ... + number
+            const = rhscode
+            terms = _termsset([(lhscode, 1)])
+        elif rhscode[0] is _EXPRADD: # ... + (_EXPRADD, ...)
+            _, const, terms = rhscode
+            terms += _termsset([(lhscode, 1)])
 
-        return Expr((_EXPRADD, 0, _termsset([(lhscode, 1), (rhscode, 1)])))
+        else:
+            const = 0
+            terms = _termsset([(lhscode, 1), (rhscode, 1)])
+
+        if terms:
+            return Expr((_EXPRADD, const, terms))
+        else:
+            return const
 
     def __radd__(rhs, lhs):
         return Expr(lhs) + rhs
@@ -190,32 +200,38 @@ class Expr(object):
                 return rhs
             elif lhscode == -1: # -1 * ... (redirect to __neg__)
                 return -rhs
-            elif rhscode[0] is _EXPRMUL: # number * (_EXPRMUL, ...)
+            elif rhscode[0] is _EXPRADD: # number * (_EXPRADD, ...)
                 _, const, terms = rhscode
-                return Expr((_EXPRMUL, lhscode * const, terms))
+                const = lhscode * const
+                terms = _termsset((k, lhscode * v) for k, v in terms.items())
+                return Expr((_EXPRADD, const, terms))
             else: # number * ...
-                return Expr((_EXPRMUL, lhscode, _termsset([(rhscode, 1)])))
+                return Expr((_EXPRADD, 0, _termsset([(rhscode, lhscode)])))
+
+        elif isnumber(rhscode):
+            if rhscode == 0: # ... * 0
+                return Expr(0)
+            elif rhscode == 1: # ... * 1
+                return lhs
+            elif rhscode == -1: # ... * -1
+                return -lhs
+            elif lhscode[0] is _EXPRADD: # (_EXPRADD, ...) * number
+                _, const, terms = lhscode
+                const = rhscode * const
+                terms = _termsset((k, rhscode * v) for k, v in terms.items())
+                return Expr((_EXPRADD, const, terms))
+            else: # ... * number
+                return Expr((_EXPRADD, 0, _termsset([(lhscode, rhscode)])))
 
         elif lhscode[0] is _EXPRMUL:
-            if isnumber(rhscode): # (_EXPRMUL, ...) * number
-                _, const, terms = lhscode
-                return Expr((_EXPRMUL, const * rhscode, terms))
-            elif rhscode[0] is _EXPRMUL: # (_EXPRMUL, ...) * (_EXPRMUL, ...)
-                _, lconst, lterms = lhscode
-                _, rconst, rterms = rhscode
-                return Expr((_EXPRMUL, lconst * rconst, lterms + rterms))
+            if rhscode[0] is _EXPRMUL: # (_EXPRMUL, ...) * (_EXPRMUL, ...)
+                return Expr((_EXPRMUL, lhscode[1] + rhscode[1]))
             else: # (_EXPRMUL, ...) * ...
-                terms += _termsset([(rhscode, 1)])
-                return Expr((_EXPRMUL, const, terms))
+                return Expr((_EXPRMUL, lhscode[1] + _termsset([(rhscode, 1)])))
+        elif rhscode[0] is _EXPRMUL: # ... * (_EXPRMUL, ...)
+            return Expr((_EXPRMUL, rhscode[1] + _termsset([(lhscode, 1)])))
 
-        elif rhscode == 0: # ... * 0
-            return Expr(0)
-        elif rhscode == 1: # ... * 1
-            return lhs
-        elif rhscode == -1: # ... * -1
-            return -lhs
-
-        return Expr((_EXPRMUL, 1, _termsset([(lhscode, 1), (rhscode, 1)])))
+        return Expr((_EXPRMUL, _termsset([(lhscode, 1), (rhscode, 1)])))
 
     def __rmul__(rhs, lhs):
         return Expr(lhs) * rhs
@@ -394,8 +410,12 @@ class Expr(object):
             self._references(code[1], result)
             result.add(Expr(code[1]))
 
-        elif code[0] is _EXPRADD or code[0] is _EXPRMUL:
+        elif code[0] is _EXPRADD:
             for term in code[2].keys():
+                self._references(term, result)
+            
+        elif code[0] is _EXPRMUL:
+            for term in code[1].keys():
                 self._references(term, result)
 
         elif code[0] is _EXPRDIV or code[0] is _EXPREXACTDIV or code[0] is _EXPRMOD:
@@ -421,11 +441,17 @@ class Expr(object):
             offset = self._movepointer(code[1], delta)
             return (_EXPRREF, (Expr(offset) + delta).code)
 
-        elif code[0] is _EXPRADD or code[0] is _EXPRMUL:
+        elif code[0] is _EXPRADD:
             terms = []
             for k, v in code[2].items():
                 terms.append((self._movepointer(k, delta), v))
-            return (code[0], code[1], _termsset(terms))
+            return (_EXPRADD, code[1], _termsset(terms))
+
+        elif code[0] is _EXPRMUL:
+            terms = []
+            for k, v in code[1].items():
+                terms.append((self._movepointer(k, delta), v))
+            return (_EXPRMUL, _termsset(terms))
 
         elif code[0] is _EXPRDIV or code[0] is _EXPREXACTDIV or code[0] is _EXPRMOD:
             lhs = self._movepointer(code[1], delta)
@@ -466,8 +492,8 @@ class Expr(object):
 
         elif code[0] is _EXPRMUL:
             terms = []
-            const = code[1]
-            for k, v in code[2].items():
+            const = 1
+            for k, v in code[1].items():
                 k = self._withmemory(k, map)
                 if isnumber(k):
                     const *= k ** v
@@ -475,7 +501,12 @@ class Expr(object):
                     terms.append((k, v))
 
             if terms:
-                return (_EXPRMUL, const, _termsset(terms))
+                if const == 0:
+                    return 0
+                elif const == 1:
+                    return (_EXPRMUL, _termsset(terms))
+                else:
+                    return (_EXPRADD, 0, _termsset([((_EXPRMUL, _termsset(terms)), const)]))
             else:
                 return const # reduced to simple expression
 
@@ -543,12 +574,9 @@ class Expr(object):
                 return '(%s)' % terms
 
         if op is _EXPRMUL:
-            _, const, terms = code
+            _, terms = code
             terms = '*'.join(map(_compactrepr, terms))
-            if const != 1:
-                return '(%s*%s)' % (const, terms)
-            else:
-                return '(%s)' % terms
+            return '(%s)' % terms
 
         if op is _EXPRDIV or op is _EXPREXACTDIV or op is _EXPRMOD:
             op, lhs, rhs = code

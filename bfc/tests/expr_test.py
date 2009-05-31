@@ -53,3 +53,34 @@ class TestExprOps:
                     assert (Expr(u) % v) == (u%v)
                     assert (u % Expr(v)) == (u%v)
 
+    def test_add(self):
+        assert Expr[4] + 0 == Expr[4]
+        assert 0 + Expr[4] == Expr[4]
+        assert Expr[4] + Expr[3] == Expr[3] + Expr[4]
+        assert Expr[4] + 3 == 3 + Expr[4]
+        assert Expr[4] - Expr[4] == 0
+        assert (-Expr[4]) + Expr[4] == 0
+
+    def test_mul(self):
+        assert Expr[4] * 0 == 0
+        assert Expr[4] * 1 == Expr[4]
+        assert Expr[4] * -1 == -Expr[4]
+        assert Expr[4] * 4 == 4 * Expr[4]
+        assert Expr[4] * Expr[3] == Expr[3] * Expr[4]
+        assert (Expr[1] * Expr[2]) * (Expr[3] * Expr[4]) == \
+                Expr[1] * (Expr[2] * Expr[3]) * Expr[4]
+
+    def test_add_linear(self):
+        assert Expr[3] * 4 + Expr[3] * 5 == Expr[3] * 9
+        assert Expr[3] * 4 + (-4) * Expr[3] == 0
+        assert (Expr[3] + 7) - Expr[3] == 7
+        assert Expr[3] + Expr[3] == 2 * Expr[3]
+        assert Expr[3] + Expr[3] - 7 * Expr[3] == -5 * Expr[3]
+
+    def test_neg(self):
+        assert -Expr(7) == -7
+        assert -(-Expr(7)) == 7
+        assert -(-(-Expr[7])) == -Expr[7]
+        assert -(Expr[3] + Expr[5]) == (-Expr[3]) + (-Expr[5])
+        assert -(7 * Expr[3] - 4 * Expr[5]) == 4 * Expr[5] - 7 * Expr[3]
+
