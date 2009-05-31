@@ -49,35 +49,55 @@ class Generator(BaseGenerator):
 
     ############################################################
 
-    def generateexpr(self, expr):
-        if isinstance(expr, (int, long)): return str(expr)
+    def _generateexpr(self, code):
+        try:
+            op = code[0]
+        except:
+            return str(code)
 
-        stack = []
-        for c in expr._simplify(expr.code):
-            if c is Expr.NEG:
-                arg = stack.pop()
-                stack.append('-%s' % arg)
-            elif c is Expr.REF:
-                arg = stack.pop()
-                stack.append('p[%s]' % arg)
-            elif c is Expr.ADD:
-                rhs = stack.pop(); lhs = stack.pop()
-                if rhs.startswith('-'):
-                    stack.append('(%s%s)' % (lhs, rhs))
-                else:
-                    stack.append('(%s+%s)' % (lhs, rhs))
-            elif c is Expr.MUL:
-                rhs = stack.pop(); lhs = stack.pop()
-                stack.append('(%s*%s)' % (lhs, rhs))
-            elif c is Expr.DIV:
-                rhs = stack.pop(); lhs = stack.pop()
-                stack.append('(%s/%s)' % (lhs, rhs))
-            elif c is Expr.MOD:
-                rhs = stack.pop(); lhs = stack.pop()
-                stack.append('(%s%%%s)' % (lhs, rhs))
+        _generateexpr = self._generateexpr
+
+        if op is Expr.REF:
+            _, offset = code
+            return 'p[%s]' % _generateexpr(offset)
+
+        if op is Expr.VAR:
+            raise RuntimeError, 'not implemented'
+
+        if op is Expr.ADD:
+            _, const, terms = code
+            result = []
+            for k, v in terms.items():
+                if v == -1: result.append('-%s' % _generateexpr(k))
+                elif v == 1: result.append('+%s' % _generateexpr(k))
+                else: result.append('%+d*%s' % (v, _generateexpr(k)))
+            terms = ''.join(result).lstrip('+')
+            if const != 0:
+                return '(%s%+d)' % (terms, const)
             else:
-                stack.append(str(c))
-        return stack[-1]
+                return '(%s)' % terms
+
+        if op is Expr.MUL:
+            _, const, terms = code
+            terms = '*'.join(map(_generateexpr, terms))
+            if const != 1:
+                return '(%s*%s)' % (const, terms)
+            else:
+                return '(%s)' % terms
+
+        if op is Expr.DIV or op is Expr.EXACTDIV:
+            _, lhs, rhs = code
+            return '(%s/%s)' % (_generateexpr(lhs), _generateexpr(rhs))
+
+        if op is Expr.MOD:
+            _, lhs, rhs = code
+            return '(%s%%%s)' % (_generateexpr(lhs), _generateexpr(rhs))
+
+        assert False
+
+    def generateexpr(self, expr):
+        if isnumber(expr): return str(expr)
+        return self._generateexpr(expr.code)
 
     def generatecond(self, cond):
         if isinstance(cond, Always):
@@ -186,10 +206,10 @@ class Generator(BaseGenerator):
         self.write('}')
 
     def generate_Repeat(self, node):
-        if node.count.code[-1] == '@': # TODO more generic code
-            count = node.count # since the memory cell is already within the range.
-        else:
-            count = node.count % (1 << self.cellsize)
+        count = node.count
+        if count.simple() or count.code[0] is not Expr.REF: # TODO more generic code
+            # the memory cell is already within the range, so no need to add modulo.
+            count %= (1 << self.cellsize)
 
         if self.debugging:
             self.dumpcomplex(self)

@@ -63,6 +63,7 @@ class Compiler(object):
         """
 
         for passcls in self.optpasses:
+            #self.generate(node); print
             passobj = passcls(self)
             # TODO passobj.check is not used yet.
             node = passobj.transform(node)

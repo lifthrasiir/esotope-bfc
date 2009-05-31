@@ -258,6 +258,24 @@ class Nop(Node):
     def compactrepr(self):
         return 'Nop[]'
 
+class UseVariable(ComplexNode):
+    def __init__(self, vars, children=[]):
+        ComplexNode.__init__(self, children)
+        self.vars = vars
+
+    def __nonzero__(self):
+        return len(self) > 0
+
+    offsets = ComplexNode.stride
+    prereferences = ComplexNode.bodyprereferences
+    postreferences = ComplexNode.bodypostreferences
+    preupdates = ComplexNode.bodypreupdates
+    postupdates = ComplexNode.bodypostupdates
+
+    def compactrepr(self):
+        return 'UseVariable[%s; %s]' % (', '.join('$%s' % i for i in self.vars),
+                                        self._innerrepr())
+
 class SetMemory(Node):
     """SetMemory node.
 
