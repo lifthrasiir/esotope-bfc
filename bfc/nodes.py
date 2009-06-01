@@ -413,7 +413,7 @@ class Output(Node):
     """
 
     def __init__(self, expr):
-        self.expr = expr
+        self.expr = Expr(expr)
 
     def pure(self):
         return False

@@ -60,6 +60,7 @@ class TestExprOps:
         assert Expr[4] + 3 == 3 + Expr[4]
         assert Expr[4] - Expr[4] == 0
         assert (-Expr[4]) + Expr[4] == 0
+        assert (Expr[4] + 7) + 9 == Expr[4] + 16
 
     def test_mul(self):
         assert Expr[4] * 0 == 0
@@ -69,6 +70,7 @@ class TestExprOps:
         assert Expr[4] * Expr[3] == Expr[3] * Expr[4]
         assert (Expr[1] * Expr[2]) * (Expr[3] * Expr[4]) == \
                 Expr[1] * (Expr[2] * Expr[3]) * Expr[4]
+        assert 4 * (Expr[5] * 5) == 20 * Expr[5]
 
     def test_add_linear(self):
         assert Expr[3] * 4 + Expr[3] * 5 == Expr[3] * 9

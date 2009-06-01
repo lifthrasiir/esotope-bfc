@@ -1,5 +1,7 @@
 # This is a part of Esotope Brainfuck Compiler.
 
+from bfc.nodes import ComplexNode
+
 class Transformer(object):
     def __init__(self, target):
         assert isinstance(target, list)
@@ -39,6 +41,19 @@ class BaseOptimizerPass(object):
 
     def __getattr__(self, name):
         return getattr(self.compiler, name)
+
+    def visit(self, node, func):
+        """pass.visit(node, func) -> anything
+
+        It calls given function with all nodes within given node recursively,
+        in the reverse order of depth-first search. (i.e. visit children first
+        and visit root later)
+        """
+
+        visit = self.visit
+        for inode in node:
+            if isinstance(inode, ComplexNode): visit(inode, func)
+        return func(node)
 
     def check(self, node):
         return False

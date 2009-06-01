@@ -5,7 +5,7 @@ from bfc.tests.utils import *
 
 from bfc.parser.brainfuck import Parser
 
-parse = Parser(0).parse
+parse = Parser(None).parse
 
 class TestBrainfuckParser:
     def test_empty(self):

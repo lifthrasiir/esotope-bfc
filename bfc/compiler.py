@@ -41,19 +41,6 @@ class Compiler(object):
         parser = self.parser(self)
         return parser.parse(fp)
 
-    def visit(self, node, func):
-        """compiler.visit(node, func) -> anything
-
-        It calls given function with all nodes within given node recursively,
-        in the reverse order of depth-first search. (i.e. visit children first
-        and visit root later)
-        """
-
-        visit = self.visit
-        for inode in node:
-            if isinstance(inode, ComplexNode): visit(inode, func)
-        return func(node)
-
     def optimize(self, node):
         """compiler.optimize(node) -> node
 
