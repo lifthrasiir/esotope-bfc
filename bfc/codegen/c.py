@@ -49,52 +49,43 @@ class Generator(BaseGenerator):
 
     ############################################################
 
-    def _generateexpr(self, code):
-        try:
-            op = code[0]
-        except:
-            return str(code)
-
+    def _generateexpr(self, expr):
         _generateexpr = self._generateexpr
 
-        if op is Expr.REF:
-            _, offset = code
-            return 'p[%s]' % _generateexpr(offset)
+        if isinstance(expr, ReferenceExpr):
+            return 'p[%s]' % _generateexpr(expr.offset)
 
-        if op is Expr.VAR:
-            raise RuntimeError, 'not implemented'
-
-        if op is Expr.ADD:
-            _, const, terms = code
+        if isinstance(expr, LinearExpr):
             result = []
-            for k, v in terms.items():
+            for v, k in expr[1:]:
                 if v == -1: result.append('-%s' % _generateexpr(k))
                 elif v == 1: result.append('+%s' % _generateexpr(k))
                 else: result.append('%+d*%s' % (v, _generateexpr(k)))
             terms = ''.join(result).lstrip('+')
-            if const != 0:
-                return '(%s%+d)' % (terms, const)
+            if not terms:
+                return str(expr[0])
+            elif expr[0] != 0:
+                return '(%s%+d)' % (terms, expr[0])
             else:
                 return '(%s)' % terms
 
-        if op is Expr.MUL:
-            _, terms = code
-            terms = '*'.join(map(_generateexpr, terms))
+        if isinstance(expr, MultiplyExpr):
+            terms = '*'.join(map(_generateexpr, expr))
             return '(%s)' % terms
 
-        if op is Expr.DIV or op is Expr.EXACTDIV:
-            _, lhs, rhs = code
-            return '(%s/%s)' % (_generateexpr(lhs), _generateexpr(rhs))
+        if isinstance(expr, (DivisionExpr, ExactDivisionExpr)):
+            return '(%s/%s)' % (_generateexpr(expr.lhs), _generateexpr(expr.rhs))
 
-        if op is Expr.MOD:
-            _, lhs, rhs = code
-            return '(%s%%%s)' % (_generateexpr(lhs), _generateexpr(rhs))
+        if isinstance(expr, ModuloExpr):
+            return '(%s%%%s)' % (_generateexpr(expr.lhs), _generateexpr(expr.rhs))
 
         assert False
 
     def generateexpr(self, expr):
-        if isnumber(expr): return str(expr)
-        return self._generateexpr(expr.code)
+        if isinstance(expr, Expr):
+            return self._generateexpr(expr)
+        else:
+            return str(expr)
 
     def generatecond(self, cond):
         if isinstance(cond, Always):
@@ -204,7 +195,7 @@ class Generator(BaseGenerator):
 
     def generate_Repeat(self, node):
         count = node.count
-        if count.simple() or count.code[0] is not Expr.REF: # TODO more generic code
+        if count.simple() or not isinstance(count, ReferenceExpr): # TODO more generic code
             # the memory cell is already within the range, so no need to add modulo.
             count %= (1 << self.cellsize)
 

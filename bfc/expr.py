@@ -170,7 +170,7 @@ class LinearExpr(_ExprNode, tuple):
         return self[0]
 
     def references(self):
-        return reduce(_operator.or_, self, frozenset())
+        return reduce(_operator.or_, [k.references() for v, k in self[1:]], frozenset())
 
     def movepointer(self, delta):
         return LinearExpr(self[0], *[(v, k.movepointer(delta)) for v, k in self[1:]])
@@ -231,7 +231,7 @@ class MultiplyExpr(_ExprNode, tuple):
         return tuple(self)
 
     def references(self):
-        return reduce(_operator.or_, self, frozenset())
+        return reduce(_operator.or_, [e.references() for e in self], frozenset())
 
     def movepointer(self, delta):
         return MultiplyExpr(*[e.movepointer(delta) for e in self])
