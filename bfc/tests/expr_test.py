@@ -4,13 +4,13 @@ from bfc.expr import *
 
 class TestExprOps:
     def test_init_number(self):
-        assert Expr().code == 0
+        assert Expr() == 0
         for v in [-9, -4, -1, 0, 1, 4, 9]:
-            assert Expr(v).code == v
+            assert isinstance(Expr(v), LinearExpr)
 
     def test_init_mem(self):
         for v in [-9, -4, -1, 0, 1, 4, 9]:
-            assert Expr[v].code == (Expr.REF, v)
+            assert isinstance(Expr[v], ReferenceExpr)
 
     def test_is_simple(self):
         assert Expr().simple()
@@ -56,6 +56,8 @@ class TestExprOps:
     def test_add(self):
         assert Expr[4] + 0 == Expr[4]
         assert 0 + Expr[4] == Expr[4]
+        assert Expr[4] - 0 == Expr[4]
+        assert 0 - Expr[4] == -Expr[4]
         assert Expr[4] + Expr[3] == Expr[3] + Expr[4]
         assert Expr[4] + 3 == 3 + Expr[4]
         assert Expr[4] - Expr[4] == 0

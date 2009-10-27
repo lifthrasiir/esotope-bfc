@@ -1,61 +1,6 @@
 # This is a part of Esotope Brainfuck Compiler.
 
-from collections import defaultdict
-
-def isnumber(obj):
-    return isinstance(obj, (int, long))
-
-class _termsset(dict):
-    """Hashable multiset holds terms in the commutative operations. It mostly
-    works like dict, but it cannot be modified normally and has + operator.
-
-    ("Normally" means it can be modified using dict methods directly, but it
-    will make __hash__ undeterministic.)
-    """
-
-    def __init__(self, iterable=None):
-        dict.__init__(self)
-        if isinstance(iterable, dict):
-            dict.update(self, iterable)
-        elif iterable is not None:
-            for k, v in iterable:
-                v += dict.get(self, k, 0)
-                if v == 0:
-                    dict.pop(self, k, None)
-                else:
-                    dict.__setitem__(self, k, v)
-
-    # these methods cannot be used.
-    def __setitem__(self, key, value): raise RuntimeError, 'dict is immutable'
-    def __delitem__(self, key): raise RuntimeError, 'dict is immutable'
-    def clear(self): raise RuntimeError, 'dict is immutable'
-    def setdefault(self,k,default=None): raise RuntimeError, 'dict is immutable'
-    def popitem(self): raise RuntimeError, 'dict is immutable'
-    def update(self, other): raise RuntimeError, 'dict is immutable'
-
-    # XXX i'm not sure that even __init__ can change the order of items
-    # undeterministically. (we can use sorted(), but it took so much time
-    # and moreover it couldn't be used in python 3.)
-    def __hash__(self): return hash(tuple(self.iteritems()))
-
-    def __add__(lhs, rhs):
-        result = dict(lhs) # convert to mutable
-        for k, v in rhs.items():
-            v += result.get(k, 0)
-            if v == 0:
-                result.pop(k, None)
-            else:
-                result[k] = v
-        return _termsset(result)
-
-
-_EXPRREF = '@' # (_EXPRREF, offset)
-_EXPRVAR = '$' # (_EXPRVAR, name)
-_EXPRADD = '+' # (_EXPRADD, const, {term: coefficient, ...})
-_EXPRMUL = '*' # (_EXPRMUL, {term: multiplicity, ...})
-_EXPRDIV = '//' # (_EXPRDIV, lhs, rhs)
-_EXPREXACTDIV = '/' # (_EXPREXACTDIV, lhs, rhs)
-_EXPRMOD = '%' # (_EXPRMOD, lhs, rhs)
+import operator as _operator
 
 class _ExprMeta(type):
     """Metaclass of Expr. Used to implement Expr[] syntax."""
@@ -66,43 +11,21 @@ class _ExprMeta(type):
         Makes the expression represents memory reference. offset is relative
         to (implicit) current pointer."""
 
-        return Expr((_EXPRREF, Expr(offset).code))
+        return ReferenceExpr(offset)
+
+    def __call__(self, obj=0):
+        if isinstance(obj, Expr): return obj
+        return LinearExpr(int(obj))
 
 class Expr(object):
     """Expression class with canonicalization.
 
     Expression is extensively used in the Brainfuck IL, as it is a lot readable
     in the output than a set of operations, and easier to implement certain
-    operations. Expression is immutable, but could be internally canonicalized.
-
-    Internally expression is stored as the postfix notation, where number
-    represents the leaf node for number, string is for the operation (like
-    _EXPRNEG, _EXPRREF, _EXPRADD etc.), and tuple is for extensions (not used
-    yet). Arity of operators is implicit and defined in _EXPRARITYMAP."""
+    operations. Expression is immutable, and always canonicalized."""
 
     __metaclass__ = _ExprMeta
-    __slots__ = ['code']
-
-    REF = _EXPRREF
-    VAR = _EXPRVAR
-    ADD = _EXPRADD
-    MUL = _EXPRMUL
-    DIV = _EXPRDIV
-    EXACTDIV = _EXPREXACTDIV
-    MOD = _EXPRMOD
-
-    def __init__(self, obj=0):
-        """Expr(number=0) -> number
-        Expr(code) -> Expr
-        Expr(exprobj) -> copy of exprobj
-
-        Creates the new expression object: normally it is used to create
-        an expression for a number (provide the number to the argument).
-        If the argument is not a number, it copies given internal notation
-        or object and creates the clone."""
-
-        if isinstance(obj, Expr): obj = obj.code
-        self.code = obj
+    __slots__ = ()
 
     def __nonzero__(self):
         """expr.__nonzero__() -> bool
@@ -111,482 +34,327 @@ class Expr(object):
         not equal to 0. Non-canonical expression like "{0}-{0}" is also non-zero.
         """
 
-        # self.code can be tuple (complex expr) or int/long (simple).
-        # since tuple in the expr cannot be empty, the latter is only case
-        # bool(self.code) could return False.
-        return bool(self.code)
+        return True
 
-    def __neg__(self):
-        code = self.code
-        if isnumber(code): return Expr(-code)
+    def __pos__(self): return self
+    def __neg__(self): return LinearExpr((-1, self))
 
-        if code[0] is _EXPRADD: # -(_EXPRADD, ...)
-            _, const, terms = code
-            negatedterms = _termsset([(k, -v) for k, v in terms.items()])
-            return Expr((_EXPRADD, -const, negatedterms))
-
-        # treat it as (0 - self).
-        return Expr((_EXPRADD, 0, _termsset([(code, -1)])))
-
-    def __pos__(self):
-        return self
-
-    def __add__(lhs, rhs):
-        lhscode = lhs.code
-        rhscode = Expr(rhs).code
-
-        if isnumber(lhscode):
-            if isnumber(rhscode): # number + number
-                return Expr(lhscode + rhscode)
-            elif lhscode == 0: # 0 + ...
-                return rhs
-            elif rhscode[0] is _EXPRADD: # number + (_EXPRADD, ...)
-                _, const, terms = rhscode
-                const += lhscode
-            else: # number + ...
-                const = lhscode
-                terms = _termsset([(rhscode, 1)])
-
-        elif lhscode[0] is _EXPRADD:
-            if isnumber(rhscode): # (_EXPRADD, ...) + number
-                _, const, terms = lhscode
-                const += rhscode
-            elif rhscode[0] is _EXPRADD: # (_EXPRADD, ...) + (_EXPRADD, ...)
-                _, lconst, lterms = lhscode
-                _, rconst, rterms = rhscode
-                const = lconst + rconst
-                terms = lterms + rterms
-            else: # (_EXPRADD, ...) + ...
-                _, const, terms = lhscode
-                terms += _termsset([(rhscode, 1)])
-
-        elif rhscode == 0: # ... + 0
-            return lhs
-        elif isnumber(rhscode): # ... + number
-            const = rhscode
-            terms = _termsset([(lhscode, 1)])
-        elif rhscode[0] is _EXPRADD: # ... + (_EXPRADD, ...)
-            _, const, terms = rhscode
-            terms += _termsset([(lhscode, 1)])
-
-        else:
-            const = 0
-            terms = _termsset([(lhscode, 1), (rhscode, 1)])
-
-        if terms:
-            return Expr((_EXPRADD, const, terms))
-        else:
-            return const
-
-    def __radd__(rhs, lhs):
-        return Expr(lhs) + rhs
-
-    def __sub__(lhs, rhs):
-        return lhs + (-rhs)
-
-    def __rsub__(rhs, lhs):
-        return lhs + (-rhs)
-
-    def __mul__(lhs, rhs):
-        lhscode = lhs.code
-        rhscode = Expr(rhs).code
-
-        if isnumber(lhscode):
-            if isnumber(rhscode): # number * number
-                return Expr(lhscode * rhscode)
-            elif lhscode == 0: # 0 * ...
-                return Expr(0)
-            elif lhscode == 1: # 1 * ...
-                return rhs
-            elif lhscode == -1: # -1 * ... (redirect to __neg__)
-                return -rhs
-            elif rhscode[0] is _EXPRADD: # number * (_EXPRADD, ...)
-                _, const, terms = rhscode
-                const = lhscode * const
-                terms = _termsset((k, lhscode * v) for k, v in terms.items())
-                return Expr((_EXPRADD, const, terms))
-            else: # number * ...
-                return Expr((_EXPRADD, 0, _termsset([(rhscode, lhscode)])))
-
-        elif isnumber(rhscode):
-            if rhscode == 0: # ... * 0
-                return Expr(0)
-            elif rhscode == 1: # ... * 1
-                return lhs
-            elif rhscode == -1: # ... * -1
-                return -lhs
-            elif lhscode[0] is _EXPRADD: # (_EXPRADD, ...) * number
-                _, const, terms = lhscode
-                const = rhscode * const
-                terms = _termsset((k, rhscode * v) for k, v in terms.items())
-                return Expr((_EXPRADD, const, terms))
-            else: # ... * number
-                return Expr((_EXPRADD, 0, _termsset([(lhscode, rhscode)])))
-
-        elif lhscode[0] is _EXPRMUL:
-            if rhscode[0] is _EXPRMUL: # (_EXPRMUL, ...) * (_EXPRMUL, ...)
-                return Expr((_EXPRMUL, lhscode[1] + rhscode[1]))
-            else: # (_EXPRMUL, ...) * ...
-                return Expr((_EXPRMUL, lhscode[1] + _termsset([(rhscode, 1)])))
-        elif rhscode[0] is _EXPRMUL: # ... * (_EXPRMUL, ...)
-            return Expr((_EXPRMUL, rhscode[1] + _termsset([(lhscode, 1)])))
-
-        return Expr((_EXPRMUL, _termsset([(lhscode, 1), (rhscode, 1)])))
-
-    def __rmul__(rhs, lhs):
-        return Expr(lhs) * rhs
-
-    def __truediv__(lhs, rhs):
-        lhscode = lhs.code
-        rhscode = Expr(rhs).code
-
-        if isnumber(lhscode):
-            if isnumber(rhscode): # number / number
-                assert lhscode % rhscode == 0, \
-                        'exact division failed: %r / %r' % (lhscode, rhscode)
-                return Expr(lhscode // rhscode)
-
-        elif rhscode == 1: # ... / 1
-            return lhs
-        elif rhscode == -1: # ... / -1
-            return -lhs
-
-        return Expr((_EXPREXACTDIV, lhscode, rhscode))
-
-    def __rtruediv__(rhs, lhs):
-        return Expr(lhs) / rhs
-
+    def __add__(lhs, rhs): return LinearExpr(lhs, rhs)
+    def __radd__(rhs, lhs): return LinearExpr(lhs, rhs)
+    def __sub__(lhs, rhs): return LinearExpr(lhs, (-1, rhs))
+    def __rsub__(rhs, lhs): return LinearExpr(lhs, (-1, rhs))
+    def __mul__(lhs, rhs): return MultiplyExpr(lhs, rhs)
+    def __rmul__(rhs, lhs): return MultiplyExpr(lhs, rhs)
+    def __truediv__(lhs, rhs): return ExactDivisionExpr(lhs, rhs)
+    def __rtruediv__(rhs, lhs): return ExactDivisionExpr(lhs, rhs)
     __div__ = __truediv__
     __rdiv__ = __rtruediv__
-
-    def __floordiv__(lhs, rhs):
-        lhscode = lhs.code
-        rhscode = Expr(rhs).code
-
-        if isnumber(lhscode):
-            if isnumber(rhscode): # number // number
-                return Expr(lhscode // rhscode)
-
-        elif rhscode == 1: # ... // 1
-            return lhs
-        elif rhscode == -1: # ... // -1
-            return -lhs
-
-        return Expr((_EXPRDIV, lhscode, rhscode))
-
-    def __rfloordiv__(rhs, lhs):
-        return Expr(lhs) // rhs
-
-    def __mod__(lhs, rhs):
-        lhscode = lhs.code
-        rhscode = Expr(rhs).code
-
-        if isnumber(lhscode) and isnumber(rhscode): # number % number
-            return Expr(lhscode % rhscode)
-
-        return Expr((_EXPRMOD, lhscode, rhscode))
-
-    def __rmod__(rhs, lhs):
-        return Expr(lhs) % rhs
-
-    def __eq__(self, rhs):
-        return self.code == Expr(rhs).code
-
-    def __ne__(self, rhs):
-        return self.code != Expr(rhs).code
-
-    def __lt__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isnumber(lhs.code) and isnumber(rhs.code):
-            return lhs.code < rhs.code
-        else:
-            return False
-
-    def __le__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isnumber(lhs.code) and isnumber(rhs.code):
-            return lhs.code <= rhs.code
-        else:
-            return False
-
-    def __gt__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isnumber(lhs.code) and isnumber(rhs.code):
-            return lhs.code > rhs.code
-        else:
-            return False
-
-    def __ge__(lhs, rhs):
-        rhs = Expr(rhs)
-        if isnumber(lhs.code) and isnumber(rhs.code):
-            return lhs.code >= rhs.code
-        else:
-            return False
-
-    def __hash__(self):
-        return hash(self.code)
-
-    def __int__(self):
-        assert self.simple()
-        return self.code
-
-    '''
-    def _simplify(self, code):
-        stack = []
-
-        for c in code:
-            if c is _EXPRNEG:
-                arg = stack.pop()
-                if len(arg) == 1: result = [-arg[0]]
-                elif arg[-1] is _EXPRNEG: result = arg[:-1]
-                else: result = arg + [_EXPRNEG]
-
-            elif c is _EXPRREF:
-                arg = stack.pop()
-                result = arg + [_EXPRREF]
-
-            elif c is _EXPRADD:
-                rhs = stack.pop()
-                lhs = stack.pop()
-                result = lhs + rhs + [_EXPRADD]
-                if len(lhs) == 1:
-                    if len(rhs) == 1: result = [lhs[0] + rhs[0]]
-                    elif lhs[0] == 0: result = rhs
-                elif len(rhs) == 1:
-                    if rhs[0] == 0: result = lhs
-
-            elif c is _EXPRMUL:
-                rhs = stack.pop()
-                lhs = stack.pop()
-                result = lhs + rhs + [_EXPRMUL]
-                if len(lhs) == 1:
-                    if len(rhs) == 1: result = [lhs[0] * rhs[0]]
-                    elif lhs[0] == 0: result = [0]
-                    elif lhs[0] == 1: result = rhs
-                    elif lhs[0] == -1: result = rhs + [_EXPRNEG]
-                elif len(rhs) == 1:
-                    if rhs[0] == 0: result = [0]
-                    elif rhs[0] == 1: result = lhs
-                    elif rhs[0] == -1: result = lhs + [_EXPRNEG]
-
-            elif c is _EXPRDIV:
-                rhs = stack.pop()
-                lhs = stack.pop()
-                result = lhs + rhs + [_EXPRDIV]
-                if len(lhs) == 1:
-                    if len(rhs) == 1: result = [lhs[0] / rhs[0]]
-                    elif lhs[0] == 0: result = []
-                elif len(rhs) == 1:
-                    if rhs[0] == 1: result = lhs
-                    elif rhs[0] == -1: result = lhs + [_EXPRNEG]
-
-            elif c is _EXPRMOD:
-                rhs = stack.pop()
-                lhs = stack.pop()
-                result = lhs + rhs + [_EXPRMOD]
-                if len(lhs) == 1 and len(rhs) == 1:
-                    result = [lhs[0] % rhs[0]]
-
-            else:
-                result = [c]
-
-            stack.append(result)
-
-        return stack[-1]
-    '''
+    def __floordiv__(lhs, rhs): return DivisionExpr(lhs, rhs)
+    def __rfloordiv__(rhs, lhs): return DivisionExpr(lhs, rhs)
+    def __mod__(lhs, rhs): return ModuloExpr(lhs, rhs)
+    def __rmod__(rhs, lhs): return ModuloExpr(lhs, rhs)
 
     def simple(self):
-        return isnumber(self.code)
-
-    def simplify(self):
-        # XXX
-        return self#return Expr(self._simplify(self.code))
-
-    def _references(self, code, result):
-        if isnumber(code):
-            pass
-
-        elif code[0] is _EXPRREF:
-            self._references(code[1], result)
-            result.add(Expr(code[1]))
-
-        elif code[0] is _EXPRADD:
-            for term in code[2].keys():
-                self._references(term, result)
-            
-        elif code[0] is _EXPRMUL:
-            for term in code[1].keys():
-                self._references(term, result)
-
-        elif code[0] is _EXPRDIV or code[0] is _EXPREXACTDIV or code[0] is _EXPRMOD:
-            self._references(code[1], result)
-            self._references(code[2], result)
-
-        else:
-            assert False
+        return False
 
     def references(self):
         """Returns the set of memory cells (possibly other Expr) the current
         expression references."""
 
-        result = set()
-        self._references(self.code, result)
-        return result
-
-    def _movepointer(self, code, delta):
-        if isnumber(code):
-            return code
-
-        elif code[0] is _EXPRREF:
-            offset = self._movepointer(code[1], delta)
-            return (_EXPRREF, (Expr(offset) + delta).code)
-
-        elif code[0] is _EXPRADD:
-            terms = []
-            for k, v in code[2].items():
-                terms.append((self._movepointer(k, delta), v))
-            return (_EXPRADD, code[1], _termsset(terms))
-
-        elif code[0] is _EXPRMUL:
-            terms = []
-            for k, v in code[1].items():
-                terms.append((self._movepointer(k, delta), v))
-            return (_EXPRMUL, _termsset(terms))
-
-        elif code[0] is _EXPRDIV or code[0] is _EXPREXACTDIV or code[0] is _EXPRMOD:
-            lhs = self._movepointer(code[1], delta)
-            rhs = self._movepointer(code[2], delta)
-            return (code[0], lhs, rhs)
-
-        else:
-            assert False
+        return frozenset()
 
     def movepointer(self, delta):
-        return Expr(self._movepointer(self.code, delta))
-
-    def _withmemory(self, code, map):
-        if isnumber(code):
-            return code
-
-        elif code[0] is _EXPRREF:
-            offset = self._withmemory(code[1], map)
-            if isnumber(offset):
-                try: return map[offset].code
-                except: pass
-            return (_EXPRREF, offset)
-
-        elif code[0] is _EXPRADD:
-            terms = []
-            const = code[1]
-            for k, v in code[2].items():
-                k = self._withmemory(k, map)
-                if isnumber(k):
-                    const += k * v
-                else:
-                    terms.append((k, v))
-
-            if terms:
-                return (_EXPRADD, const, _termsset(terms))
-            else:
-                return const # reduced to simple expression
-
-        elif code[0] is _EXPRMUL:
-            terms = []
-            const = 1
-            for k, v in code[1].items():
-                k = self._withmemory(k, map)
-                if isnumber(k):
-                    const *= k ** v
-                else:
-                    terms.append((k, v))
-
-            if terms:
-                if const == 0:
-                    return 0
-                elif const == 1:
-                    return (_EXPRMUL, _termsset(terms))
-                else:
-                    return (_EXPRADD, 0, _termsset([((_EXPRMUL, _termsset(terms)), const)]))
-            else:
-                return const # reduced to simple expression
-
-        elif code[0] is _EXPRDIV:
-            lhs = self._withmemory(code[1], map)
-            rhs = self._withmemory(code[2], map)
-
-            if isnumber(lhs) and isnumber(rhs):
-                return lhs // rhs
-            else:
-                return (_EXPRDIV, lhs, rhs)
-
-        elif code[0] is _EXPREXACTDIV:
-            lhs = self._withmemory(code[1], map)
-            rhs = self._withmemory(code[2], map)
-
-            if isnumber(lhs) and isnumber(rhs):
-                assert lhs % rhs == 0, 'exact division failed: %r / %r' % (lhs, rhs)
-                return lhs // rhs
-            else:
-                return (_EXPREXACTDIV, lhs, rhs)
-
-        elif code[0] is _EXPRMOD:
-            lhs = self._withmemory(code[1], map)
-            rhs = self._withmemory(code[2], map)
-
-            if isnumber(lhs) and isnumber(rhs):
-                return lhs % rhs
-            else:
-                return (_EXPRMOD, lhs, rhs)
-
-        else:
-            assert False
+        return self
 
     def withmemory(self, map):
-        return Expr(self._withmemory(self.code, map))
-
-    def _compactrepr(self, code):
-        try:
-            op = code[0]
-        except:
-            return str(code)
-
-        _compactrepr = self._compactrepr
-
-        if op is _EXPRREF:
-            _, offset = code
-            return '{%s}' % _compactrepr(offset)
-
-        if op is _EXPRVAR:
-            _, name = code
-            return '$%s' % name
-
-        if op is _EXPRADD:
-            _, const, terms = code
-            result = []
-            for k, v in terms.items():
-                if v == -1: result.append('-%s' % _compactrepr(k))
-                elif v == 1: result.append('+%s' % _compactrepr(k))
-                else: result.append('%+d*%s' % (v, _compactrepr(k)))
-            terms = ''.join(result).lstrip('+')
-            if const != 0:
-                return '(%s%+d)' % (terms, const)
-            else:
-                return '(%s)' % terms
-
-        if op is _EXPRMUL:
-            _, terms = code
-            terms = '*'.join(map(_compactrepr, terms))
-            return '(%s)' % terms
-
-        if op is _EXPRDIV or op is _EXPREXACTDIV or op is _EXPRMOD:
-            op, lhs, rhs = code
-            return '(%s%s%s)' % (_compactrepr(lhs), op, _compactrepr(rhs))
-
-        assert False
-
-    def compactrepr(self):
-        return self._compactrepr(self.code)
+        return self
 
     def __repr__(self):
         return '<Expr: %s>' % self.compactrepr()
+
+class _ExprNodeMeta(_ExprMeta):
+    __call__ = type.__call__
+
+class _ExprNode(Expr):
+    __metaclass__ = _ExprNodeMeta
+
+    def __hash__(self):
+        return hash(tuple.__add__((self.__class__,), self.args))
+
+    def __eq__(lhs, rhs):
+        rhs = Expr(rhs)
+        return type(lhs) == type(rhs) and lhs.args == rhs.args
+
+    def __ne__(lhs, rhs):
+        rhs = Expr(rhs)
+        return type(lhs) != type(rhs) or lhs.args != rhs.args
+
+class ReferenceExpr(_ExprNode):
+    __slots__ = ('offset',)
+
+    def __init__(self, offset):
+        self.offset = Expr(offset)
+
+    @property
+    def args(self):
+        return (self.offset,)
+
+    def references(self):
+        return frozenset([self.offset])
+
+    def movepointer(self, delta):
+        return ReferenceExpr(self.offset.movepointer(delta) + delta)
+
+    def withmemory(self, map):
+        newoffset = self.offset.withmemory(map)
+        try:
+            if newoffset.simple(): return Expr(map[newoffset])
+        except KeyError:
+            pass
+        return ReferenceExpr(newoffset)
+
+    def compactrepr(self, prec=0):
+        return '{%s}' % self.offset.compactrepr()
+
+class LinearExpr(_ExprNode, tuple):
+    __slots__ = ()
+
+    def __new__(cls, *terms):
+        # normalize terms as (const, (coeff1, term1), (coeff2, term2), ...)
+        const = 0
+        termsmap = {}
+        for term in terms:
+            try:
+                const += int(term)
+            except:
+                if isinstance(term, Expr):
+                    coeff = 1
+                else:
+                    coeff, term = term
+                    coeff = int(coeff)
+
+                if isinstance(term, LinearExpr): # flatten
+                    const += coeff * term.args[0]
+                    for v, k in term.args[1:]:
+                        termsmap[k] = termsmap.get(k, 0) + coeff * v
+                elif isinstance(term, (int, long)):
+                    const += coeff * term
+                else:
+                    termsmap[term] = termsmap.get(term, 0) + coeff
+
+        args = [const]
+        for k, v in termsmap.items():
+            if v != 0: args.append((v, k))
+        if len(args) == 2 and args[0] == 0 and args[1][0] == 1:
+            return args[1][1] # special casing
+        return tuple.__new__(cls, args)
+
+    def __nonzero__(self):
+        return len(self) != 1 or self[0] != 0
+
+    def __hash__(self):
+        if len(self) == 1:
+            return hash(self[0])
+        else:
+            return hash(tuple.__add__((self.__class__,), self))
+
+    @property
+    def args(self):
+        return tuple(self)
+
+    def simple(self):
+        return (len(self) == 1)
+
+    def __int__(self):
+        assert len(self) == 1
+        return self[0]
+
+    def references(self):
+        return reduce(_operator.or_, self, frozenset())
+
+    def movepointer(self, delta):
+        return LinearExpr(self[0], *[(v, k.movepointer(delta)) for v, k in self[1:]])
+
+    def withmemory(self, map):
+        return LinearExpr(self[0], *[(v, k.withmemory(map)) for v, k in self[1:]])
+
+    def compactrepr(self, prec=0):
+        result = []
+        for v, k in self[1:]:
+            if v == -1: result.append('-%s' % k.compactrepr(1))
+            elif v == 1: result.append('+%s' % k.compactrepr(1))
+            else: result.append('%+d*%s' % (v, k.compactrepr(1)))
+        if self[0] != 0:
+            result.append('%+d' % self[0])
+
+        if result:
+            terms = ''.join(result).lstrip('+')
+        else:
+            terms = '0'
+        if prec > 1 and len(result) > 1:
+            terms = '(%s)' % terms
+        return terms
+
+class MultiplyExpr(_ExprNode, tuple):
+    __slots__ = ()
+
+    def __new__(cls, *terms):
+        # filter integral terms here.
+        factor = 1
+        realterms = []
+        for term in terms:
+            try:
+                factor *= int(term)
+            except:
+                if isinstance(term, LinearExpr) and len(term) == 2 and term[0] == 0:
+                    factor *= term[1][0]
+                    term = term[1][1]
+                if isinstance(term, MultiplyExpr):
+                    realterms.extend(term)
+                else:
+                    realterms.append(term)
+        realterms.sort(key=hash) # XXX
+
+        if not realterms: # e.g. MultiplyExpr(4, 5)
+            return LinearExpr(factor)
+        elif factor == 0: # e.g. MultiplyExpr(0, Expr[3])
+            return LinearExpr()
+        elif factor != 1: # e.g. MultiplyExpr(2, Expr[3])
+            return LinearExpr((factor, MultiplyExpr(*realterms)))
+        elif len(realterms) == 1: # e.g. MultiplyExpr(Expr[3])
+            return realterms[0]
+        else:
+            return tuple.__new__(cls, realterms)
+
+    @property
+    def args(self):
+        return tuple(self)
+
+    def references(self):
+        return reduce(_operator.or_, self, frozenset())
+
+    def movepointer(self, delta):
+        return MultiplyExpr(*[e.movepointer(delta) for e in self])
+
+    def withmemory(self, map):
+        return MultiplyExpr(*[e.withmemory(map) for e in self])
+
+    def compactrepr(self, prec=0):
+        terms = '*'.join(e.compactrepr(2) for e in self)
+        if prec > 2 and len(result) > 1: terms = '(%s)' % terms
+        return terms
+
+class DivisionExpr(_ExprNode):
+    __slots__ = ('lhs', 'rhs')
+
+    def __new__(cls, lhs, rhs):
+        try: rvalue = int(rhs)
+        except: pass
+        else:
+            try: lvalue = int(lhs)
+            except:
+                if rvalue == 1: return lhs
+                if rvalue == -1: return -lhs
+            else:
+                return LinearExpr(lvalue // rvalue)
+
+        return _ExprNode.__new__(DivisionExpr, lhs, rhs)
+
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @property
+    def args(self):
+        return (self.lhs, self.rhs)
+
+    def references(self):
+        return self.lhs.references() | self.rhs.references()
+
+    def movepointer(self, delta):
+        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+
+    def withmemory(self, map):
+        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+
+    def compactrepr(self, prec=0):
+        terms = '%s//%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        if prec > 3: terms = '(%s)' % terms
+        return terms
+
+class ExactDivisionExpr(_ExprNode):
+    __slots__ = ('lhs', 'rhs')
+
+    def __new__(cls, lhs, rhs):
+        try: rvalue = int(rhs)
+        except: pass
+        else:
+            try: lvalue = int(lhs)
+            except:
+                if rvalue == 1: return lhs
+                if rvalue == -1: return -lhs
+            else:
+                assert lvalue % rvalue == 0, \
+                        'exact division failed: %r / %r' % (lvalue, rvalue)
+                return LinearExpr(lvalue // rvalue)
+
+        return _ExprNode.__new__(ExactDivisionExpr, lhs, rhs)
+
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @property
+    def args(self):
+        return (self.lhs, self.rhs)
+
+    def references(self):
+        return self.lhs.references() | self.rhs.references()
+
+    def movepointer(self, delta):
+        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+
+    def withmemory(self, map):
+        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+
+    def compactrepr(self, prec=0):
+        terms = '%s/%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        if prec > 3: terms = '(%s)' % terms
+        return terms
+
+class ModuloExpr(_ExprNode):
+    __slots__ = ('lhs', 'rhs')
+
+    def __new__(cls, lhs, rhs):
+        try:
+            rvalue = int(rhs)
+            lvalue = int(lhs)
+        except:
+            pass
+        else:
+            return LinearExpr(int(lhs) % rvalue)
+
+        return _ExprNode.__new__(ModuloExpr, lhs, rhs)
+
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @property
+    def args(self):
+        return (self.lhs, self.rhs)
+
+    def references(self):
+        return self.lhs.references() | self.rhs.references()
+
+    def movepointer(self, delta):
+        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+
+    def withmemory(self, map):
+        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+
+    def compactrepr(self, prec=0):
+        terms = '%s%%%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        if prec > 3: terms = '(%s)' % terms
+        return terms
 

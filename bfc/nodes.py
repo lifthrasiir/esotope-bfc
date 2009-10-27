@@ -347,10 +347,11 @@ class AdjustMemory(Node):
     postupdates = preupdates
 
     def compactrepr(self):
-        if self.delta < 0:
-            return '{%d}-=%s' % (self.offset, (-self.delta).compactrepr())
+        delta = self.delta.compactrepr()
+        if delta.startswith('-'):
+            return '{%d}-=%s' % (self.offset, delta[1:])
         else:
-            return '{%d}+=%s' % (self.offset, self.delta.compactrepr())
+            return '{%d}+=%s' % (self.offset, delta)
 
     def __repr__(self):
         return 'AdjustMemory[%d, %s]' % (self.offset, self.delta.compactrepr())
