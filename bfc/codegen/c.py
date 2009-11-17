@@ -79,7 +79,8 @@ class Generator(BaseGenerator):
         if isinstance(expr, ModuloExpr):
             return '(%s%%%s)' % (_generateexpr(expr.lhs), _generateexpr(expr.rhs))
 
-        assert False
+        assert not isinstance(expr, Expr)
+        return str(expr)
 
     def generateexpr(self, expr):
         if isinstance(expr, Expr):

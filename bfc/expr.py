@@ -2,6 +2,22 @@
 
 import operator as _operator
 
+def _references(obj):
+    if isinstance(obj, Expr): return obj.references()
+    else: return frozenset()
+
+def _movepointer(obj, delta):
+    if isinstance(obj, Expr): return obj.movepointer(delta)
+    else: return obj
+
+def _withmemory(obj, map):
+    if isinstance(obj, Expr): return obj.withmemory(map)
+    else: return obj
+
+def _compactrepr(obj, prec=0):
+    if isinstance(obj, Expr): return obj.compactrepr(prec)
+    else: return str(obj)
+
 class _ExprMeta(type):
     """Metaclass of Expr. Used to implement Expr[] syntax."""
 
@@ -103,10 +119,10 @@ class ReferenceExpr(_ExprNode):
         return frozenset([self.offset])
 
     def movepointer(self, delta):
-        return ReferenceExpr(self.offset.movepointer(delta) + delta)
+        return ReferenceExpr(_movepointer(self.offset, delta) + delta)
 
     def withmemory(self, map):
-        newoffset = self.offset.withmemory(map)
+        newoffset = _withmemory(self.offset, map)
         try:
             if newoffset.simple(): return Expr(map[newoffset])
         except KeyError:
@@ -114,7 +130,7 @@ class ReferenceExpr(_ExprNode):
         return ReferenceExpr(newoffset)
 
     def compactrepr(self, prec=0):
-        return '{%s}' % self.offset.compactrepr()
+        return '{%s}' % _compactrepr(self.offset)
 
 class LinearExpr(_ExprNode, tuple):
     __slots__ = ()
@@ -170,20 +186,20 @@ class LinearExpr(_ExprNode, tuple):
         return self[0]
 
     def references(self):
-        return reduce(_operator.or_, [k.references() for v, k in self[1:]], frozenset())
+        return reduce(_operator.or_, [_references(k) for v, k in self[1:]], frozenset())
 
     def movepointer(self, delta):
-        return LinearExpr(self[0], *[(v, k.movepointer(delta)) for v, k in self[1:]])
+        return LinearExpr(self[0], *[(v, _movepointer(k, delta)) for v, k in self[1:]])
 
     def withmemory(self, map):
-        return LinearExpr(self[0], *[(v, k.withmemory(map)) for v, k in self[1:]])
+        return LinearExpr(self[0], *[(v, _withmemory(k, map)) for v, k in self[1:]])
 
     def compactrepr(self, prec=0):
         result = []
         for v, k in self[1:]:
-            if v == -1: result.append('-%s' % k.compactrepr(1))
-            elif v == 1: result.append('+%s' % k.compactrepr(1))
-            else: result.append('%+d*%s' % (v, k.compactrepr(1)))
+            if v == -1: result.append('-%s' % _compactrepr(k, 1))
+            elif v == 1: result.append('+%s' % _compactrepr(k, 1))
+            else: result.append('%+d*%s' % (v, _compactrepr(k, 1)))
         if self[0] != 0:
             result.append('%+d' % self[0])
 
@@ -231,16 +247,16 @@ class MultiplyExpr(_ExprNode, tuple):
         return tuple(self)
 
     def references(self):
-        return reduce(_operator.or_, [e.references() for e in self], frozenset())
+        return reduce(_operator.or_, [_references(e) for e in self], frozenset())
 
     def movepointer(self, delta):
-        return MultiplyExpr(*[e.movepointer(delta) for e in self])
+        return MultiplyExpr(*[_movepointer(e, delta) for e in self])
 
     def withmemory(self, map):
-        return MultiplyExpr(*[e.withmemory(map) for e in self])
+        return MultiplyExpr(*[_withmemory(e, map) for e in self])
 
     def compactrepr(self, prec=0):
-        terms = '*'.join(e.compactrepr(2) for e in self)
+        terms = '*'.join(_compactrepr(e, 2) for e in self)
         if prec > 2 and len(result) > 1: terms = '(%s)' % terms
         return terms
 
@@ -258,7 +274,7 @@ class DivisionExpr(_ExprNode):
             else:
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(DivisionExpr, lhs, rhs)
+        return _ExprNode.__new__(DivisionExpr)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -269,16 +285,16 @@ class DivisionExpr(_ExprNode):
         return (self.lhs, self.rhs)
 
     def references(self):
-        return self.lhs.references() | self.rhs.references()
+        return _references(self.lhs) | _references(self.rhs)
 
     def movepointer(self, delta):
-        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+        return DivisionExpr(_movepointer(self.lhs, delta), _movepointer(self.rhs, delta))
 
     def withmemory(self, map):
-        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+        return DivisionExpr(_withmemory(self.lhs, map), _withmemory(self.rhs, map))
 
     def compactrepr(self, prec=0):
-        terms = '%s//%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        terms = '%s//%s' % (_compactrepr(self.lhs, 2), _compactrepr(self.rhs, 3))
         if prec > 3: terms = '(%s)' % terms
         return terms
 
@@ -298,7 +314,7 @@ class ExactDivisionExpr(_ExprNode):
                         'exact division failed: %r / %r' % (lvalue, rvalue)
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(ExactDivisionExpr, lhs, rhs)
+        return _ExprNode.__new__(ExactDivisionExpr)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -309,16 +325,16 @@ class ExactDivisionExpr(_ExprNode):
         return (self.lhs, self.rhs)
 
     def references(self):
-        return self.lhs.references() | self.rhs.references()
+        return _references(self.lhs) | _references(self.rhs)
 
     def movepointer(self, delta):
-        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+        return ExactDivisionExpr(_movepointer(self.lhs, delta), _movepointer(self.rhs, delta))
 
     def withmemory(self, map):
-        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+        return ExactDivisionExpr(_withmemory(self.lhs, map), _withmemory(self.rhs, map))
 
     def compactrepr(self, prec=0):
-        terms = '%s/%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        terms = '%s/%s' % (_compactrepr(self.lhs, 2), _compactrepr(self.rhs, 3))
         if prec > 3: terms = '(%s)' % terms
         return terms
 
@@ -334,7 +350,7 @@ class ModuloExpr(_ExprNode):
         else:
             return LinearExpr(int(lhs) % rvalue)
 
-        return _ExprNode.__new__(ModuloExpr, lhs, rhs)
+        return _ExprNode.__new__(ModuloExpr)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -345,16 +361,16 @@ class ModuloExpr(_ExprNode):
         return (self.lhs, self.rhs)
 
     def references(self):
-        return self.lhs.references() | self.rhs.references()
+        return _references(self.lhs) | _references(self.rhs)
 
     def movepointer(self, delta):
-        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+        return ModuloExpr(_movepointer(self.lhs, delta), _movepointer(self.rhs, delta))
 
     def withmemory(self, map):
-        return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+        return ModuloExpr(_withmemory(self.lhs, map), _withmemory(self.rhs, map))
 
     def compactrepr(self, prec=0):
-        terms = '%s%%%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
+        terms = '%s%%%s' % (_compactrepr(self.lhs, 2), _compactrepr(self.rhs, 3))
         if prec > 3: terms = '(%s)' % terms
         return terms
 
