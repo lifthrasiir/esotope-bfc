@@ -133,7 +133,7 @@ class Node(object):
         Moves all memory references in the node by given offset. This is an
         in-place operation."""
 
-        raise RuntimeError('not implemented')
+        raise NotImplementedError
 
     # propagates known memory cells given.
     def withmemory(self, map):
@@ -160,7 +160,7 @@ class Node(object):
     def returns(self): return True
 
     def compactrepr(self):
-        raise RuntimeError('not implemented')
+        raise NotImplementedError
 
     def __repr__(self):
         return self.compactrepr()
@@ -287,9 +287,25 @@ class SetMemory(Node):
     one is AdjustMemory.
     """
 
-    def __init__(self, offset, value):
+    def __init__(self, offset, value=None, delta=None):
         self.offset = offset
-        self.value = Expr(value)
+        if delta is not None:
+            assert value is None
+            self.delta = Expr(delta)
+        else:
+            assert delta is None
+            self.value = Expr(value)
+
+    def __nonzero__(self):
+        return self.value != Expr[self.offset]
+
+    def _get_delta(self):
+        return self.value - Expr[self.offset]
+
+    def _set_delta(self, delta):
+        self.value = Expr[self.offset] + delta
+
+    delta = property(_get_delta, _set_delta)
 
     def movepointer(self, offset):
         self.offset += offset
@@ -307,54 +323,29 @@ class SetMemory(Node):
     postupdates = preupdates
 
     def compactrepr(self):
-        return '{%d}=%s' % (self.offset, self.value.compactrepr())
+        fullrepr = '{%d}=%s' % (self.offset, self.value.compactrepr())
+        delta = self.delta.compactrepr()
+        if delta.startswith('-'):
+            shortrepr = '{%d}-=%s' % (self.offset, delta[1:])
+        else:
+            shortrepr = '{%d}+=%s' % (self.offset, delta)
+        if len(shortrepr) < len(fullrepr):
+            return shortrepr
+        else:
+            return fullrepr
 
     def __repr__(self):
         return 'SetMemory[%d, %s]' % (self.offset, self.value.compactrepr())
 
-class AdjustMemory(Node):
-    """AdjustMemory node.
-
-    AdjustMemory[offset, value], or {offset}+=value and {offset}-=value in the
-    compact notation, is equivalent to {offset}={offset}+value and {offset}=
-    {offset}-value respectively.
-
-    AdjustMemory is added for convenience, as current canonicalization routine
-    cannot handle complex expression like ({x}+v)-{x}. We plan to improve the
-    canonicalization routine thus remove the need for AdjustMemory entirely.
+def AdjustMemory(offset, delta):
+    """AdjustMemory[offset, delta] is a syntactic sugar for
+    SetMemory[offset, {offset}+delta].
+    
+    This was historically used in older version of esotope-bfc, but now fully
+    merged into SetMemory. The constructor "function" remains for convenience.
     """
 
-    def __init__(self, offset, delta):
-        self.offset = offset
-        self.delta = Expr(delta)
-
-    def __nonzero__(self):
-        return self.delta != 0
-
-    def movepointer(self, offset):
-        self.offset += offset
-        self.delta = self.delta.movepointer(offset)
-
-    def withmemory(self, map):
-        self.delta = self.delta.withmemory(map)
-
-    def prereferences(self):
-        return cellset(sure=self.delta.references().union([self.offset]))
-    postreferences = prereferences
-
-    def preupdates(self):
-        return cellset(sure=[self.offset])
-    postupdates = preupdates
-
-    def compactrepr(self):
-        delta = self.delta.compactrepr()
-        if delta.startswith('-'):
-            return '{%d}-=%s' % (self.offset, delta[1:])
-        else:
-            return '{%d}+=%s' % (self.offset, delta)
-
-    def __repr__(self):
-        return 'AdjustMemory[%d, %s]' % (self.offset, self.delta.compactrepr())
+    return SetMemory(offset, delta=delta)
 
 class MovePointer(Node):
     """MovePointer node.

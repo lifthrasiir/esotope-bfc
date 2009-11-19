@@ -49,7 +49,7 @@ class Generator(BaseGenerator):
 
     ############################################################
 
-    def _generateexpr(self, expr):
+    def _generateexpr(self, expr, prec=0):
         _generateexpr = self._generateexpr
 
         if isinstance(expr, ReferenceExpr):
@@ -58,26 +58,34 @@ class Generator(BaseGenerator):
         if isinstance(expr, LinearExpr):
             result = []
             for v, k in expr[1:]:
-                if v == -1: result.append('-%s' % _generateexpr(k))
-                elif v == 1: result.append('+%s' % _generateexpr(k))
-                else: result.append('%+d*%s' % (v, _generateexpr(k)))
-            terms = ''.join(result).lstrip('+')
-            if not terms:
-                return str(expr[0])
-            elif expr[0] != 0:
-                return '(%s%+d)' % (terms, expr[0])
+                if v == -1: result.append('-%s' % _generateexpr(k, 1))
+                elif v == 1: result.append('+%s' % _generateexpr(k, 1))
+                else: result.append('%+d*%s' % (v, _generateexpr(k, 1)))
+            if expr[0] != 0:
+                result.append('%+d' % expr[0])
+
+            if result:
+                terms = ''.join(result).lstrip('+')
             else:
-                return '(%s)' % terms
+                terms = '0'
+            if prec > 1 and len(result) > 1:
+                terms = '(%s)' % terms
+            return terms
 
         if isinstance(expr, MultiplyExpr):
-            terms = '*'.join(map(_generateexpr, expr))
-            return '(%s)' % terms
+            terms = '*'.join(_generateexpr(e, 2) for e in expr)
+            if prec > 2 and len(expr) > 1: terms = '(%s)' % terms
+            return terms
 
         if isinstance(expr, (DivisionExpr, ExactDivisionExpr)):
-            return '(%s/%s)' % (_generateexpr(expr.lhs), _generateexpr(expr.rhs))
+            terms = '%s/%s' % (_generateexpr(expr.lhs, 2), _generateexpr(expr.rhs, 2))
+            if prec > 3: terms = '(%s)' % terms
+            return terms
 
         if isinstance(expr, ModuloExpr):
-            return '(%s%%%s)' % (_generateexpr(expr.lhs), _generateexpr(expr.rhs))
+            terms = '%s%%%s' % (_generateexpr(expr.lhs, 2), _generateexpr(expr.rhs, 2))
+            if prec > 3: terms = '(%s)' % terms
+            return terms
 
         assert not isinstance(expr, Expr)
         return str(expr)
@@ -159,11 +167,12 @@ class Generator(BaseGenerator):
         pass # do nothing
 
     def generate_SetMemory(self, node):
-        self.write('p[%d] = %s;' % (node.offset, self.generateexpr(node.value)))
-
-    def generate_AdjustMemory(self, node):
-        stmt = self._formatadjust('p[%d]' % node.offset, node.delta)
-        if stmt: self.write(stmt + ';')
+        fullstmt = 'p[%d] = %s;' % (node.offset, self.generateexpr(node.value))
+        shortstmt = self._formatadjust('p[%d]' % node.offset, node.delta) + ';'
+        if len(shortstmt) < len(fullstmt):
+            self.write(shortstmt)
+        else:
+            self.write(fullstmt)
 
     def generate_MovePointer(self, node):
         stmt = self._formatadjust('p', node.offset)

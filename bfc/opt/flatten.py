@@ -14,13 +14,13 @@ class OptimizerPass(BaseOptimizerPass):
         changesabs = {}
         offset = 0
         for cur in node:
-            if isinstance(cur, AdjustMemory):
+            if isinstance(cur, SetMemory):
                 ioffset = offset + cur.offset
-                changes[ioffset] = changes.get(ioffset, 0) + cur.delta
-            elif isinstance(cur, SetMemory):
-                ioffset = offset + cur.offset
-                changes[ioffset] = cur.value
-                changesabs[ioffset] = True
+                if cur.delta.simple():
+                    changes[ioffset] = changes.get(ioffset, 0) + cur.delta
+                else:
+                    changes[ioffset] = cur.value
+                    changesabs[ioffset] = True
             elif isinstance(cur, MovePointer):
                 offset += cur.offset
             else:

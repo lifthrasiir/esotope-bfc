@@ -31,20 +31,18 @@ class OptimizerPass(BaseOptimizerPass):
                 offset = cur.offset
                 if cur.value.simple():
                     substs[offset] = cur.value
+                elif cur.delta.simple():
+                    if offset in substs:
+                        substs[offset] += cur.delta
+                        if substs[offset].simple():
+                            # replace with equivalent SetMemory node.
+                            cur = SetMemory(offset, substs[offset])
+                            tr.replace(cur)
+                        else:
+                            del substs[offset]
                 else:
                     try: del substs[offset]
                     except: pass
-            elif isinstance(cur, AdjustMemory):
-                alters = mergable = True
-                offset = cur.offset
-                if offset in substs:
-                    substs[offset] += cur.delta
-                    if substs[offset].simple():
-                        # replace with equivalent SetMemory node.
-                        cur = SetMemory(offset, substs[offset])
-                        tr.replace(cur)
-                    else:
-                        del substs[offset]
             elif isinstance(cur, Input):
                 alters = True
                 offset = cur.offset
@@ -80,8 +78,8 @@ class OptimizerPass(BaseOptimizerPass):
                         target = backrefs[offset]
                         if target >= usedrefs.get(offset, -1) and \
                                 all(target >= backrefs.get(ioffset, -1) for ioffset in refs):
-                            if isinstance(cur, AdjustMemory):
-                                if isinstance(node[target], SetMemory):
+                            if isinstance(cur, SetMemory) and cur.delta.simple():
+                                if node[target].delta.simple():
                                     node[target].value += cur.delta
                                 else:
                                     node[target].delta += cur.delta

@@ -257,7 +257,7 @@ class MultiplyExpr(_ExprNode, tuple):
 
     def compactrepr(self, prec=0):
         terms = '*'.join(_compactrepr(e, 2) for e in self)
-        if prec > 2 and len(result) > 1: terms = '(%s)' % terms
+        if prec > 2 and len(expr) > 1: terms = '(%s)' % terms
         return terms
 
 class DivisionExpr(_ExprNode):
@@ -274,7 +274,7 @@ class DivisionExpr(_ExprNode):
             else:
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(DivisionExpr)
+        return _ExprNode.__new__(cls)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -314,7 +314,7 @@ class ExactDivisionExpr(_ExprNode):
                         'exact division failed: %r / %r' % (lvalue, rvalue)
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(ExactDivisionExpr)
+        return _ExprNode.__new__(cls)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -350,7 +350,7 @@ class ModuloExpr(_ExprNode):
         else:
             return LinearExpr(int(lhs) % rvalue)
 
-        return _ExprNode.__new__(ModuloExpr)
+        return _ExprNode.__new__(cls)
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs

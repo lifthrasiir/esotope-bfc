@@ -42,16 +42,18 @@ def cleanup(node):
             hasset = False
             for inode in cur:
                 if isinstance(inode, SetMemory):
-                    if not inode.value.simple(): break
-                    hasset = True
-                elif isinstance(inode, AdjustMemory):
-                    if not inode.delta.simple(): break
+                    if inode.value.simple():
+                        hasset = True
+                    elif inode.delta.simple():
+                        pass
+                    else:
+                        break
                 else:
                     break
 
             else:
                 for inode in cur:
-                    if isinstance(inode, AdjustMemory):
+                    if isinstance(inode, SetMemory) and inode.delta.simple():
                         inode.delta *= cur.count
                 if hasset:
                     # cannot flatten, but we can turn it into If[]

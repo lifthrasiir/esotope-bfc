@@ -49,13 +49,13 @@ class OptimizerPass(BaseOptimizerPass):
             mode = 0 # 0:adjust, 1:set, -1:unknown
 
             for inode in cur:
-                if isinstance(inode, AdjustMemory):
+                if isinstance(inode, SetMemory):
                     if inode.offset == target:
-                        cell += inode.delta
-                elif isinstance(inode, SetMemory):
-                    if inode.offset == target:
-                        cell = inode.value
-                        mode = 1
+                        if inode.delta.simple():
+                            cell += inode.delta
+                        else:
+                            cell = inode.value
+                            mode = 1
                 else:
                     if not inode.pure():
                         flag = False
@@ -109,7 +109,7 @@ class OptimizerPass(BaseOptimizerPass):
                 count = (u % overflow) * (diff // gcd)
 
                 inodes = [inode for inode in cur
-                          if not (isinstance(inode, (SetMemory, AdjustMemory)) and
+                          if not (isinstance(inode, SetMemory) and
                                   inode.offset == target)]
 
                 result = []
