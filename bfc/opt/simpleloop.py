@@ -109,14 +109,12 @@ class OptimizerPass(BaseOptimizerPass):
                 count = (u % overflow) * (diff // gcd)
 
                 inodes = [inode for inode in cur
-                          if not (isinstance(inode, SetMemory) and
-                                  inode.offset == target)]
+                          if not (isinstance(inode, SetMemory) and inode.offset == target)]
 
                 result = []
                 if gcd > 1: 
                     # no need to check if x is a multiple of gcd(m,w) (=1).
-                    result.append(If(ExprNotEqual(diff % gcd, 0),
-                                     [While(Always())]))
+                    result.append(If(NotEqual(diff % gcd, 0), [While(Always())]))
                 if inodes:
                     # don't emit Repeat[] if [-] or [+] is given.
                     result.append(Repeat(count, inodes))

@@ -57,7 +57,7 @@ def cleanup(node):
                         inode.delta *= cur.count
                 if hasset:
                     # cannot flatten, but we can turn it into If[]
-                    tr.replace(If(ExprNotEqual(cur.count, 0), cur[:]))
+                    tr.replace(If(NotEqual(cur.count, 0), cur[:]))
                 else:
                     tr.replace(*cur)
 

@@ -1,6 +1,7 @@
 # This is a part of Esotope Brainfuck Compiler.
 
 import operator as _operator
+from bfc.utils import *
 
 def _references(obj):
     if isinstance(obj, Expr): return obj.references()
@@ -18,7 +19,7 @@ def _compactrepr(obj, prec=0):
     if isinstance(obj, Expr): return obj.compactrepr(prec)
     else: return str(obj)
 
-class _ExprMeta(type):
+class _ExprMeta(gentype):
     """Metaclass of Expr. Used to implement Expr[] syntax."""
 
     def __getitem__(self, offset):
@@ -29,11 +30,7 @@ class _ExprMeta(type):
 
         return ReferenceExpr(offset)
 
-    def __call__(self, obj=0):
-        if isinstance(obj, Expr): return obj
-        return LinearExpr(int(obj))
-
-class Expr(object):
+class Expr(genobject):
     """Expression class with canonicalization.
 
     Expression is extensively used in the Brainfuck IL, as it is a lot readable
@@ -41,7 +38,10 @@ class Expr(object):
     operations. Expression is immutable, and always canonicalized."""
 
     __metaclass__ = _ExprMeta
-    __slots__ = ()
+
+    def __gen__(cls, obj=0):
+        if isinstance(obj, Expr): return obj
+        return LinearExpr(int(obj))
 
     def __nonzero__(self):
         """expr.__nonzero__() -> bool
@@ -88,11 +88,8 @@ class Expr(object):
     def __repr__(self):
         return '<Expr: %s>' % self.compactrepr()
 
-class _ExprNodeMeta(_ExprMeta):
-    __call__ = type.__call__
-
 class _ExprNode(Expr):
-    __metaclass__ = _ExprNodeMeta
+    __gen__ = genobject.__gen__
 
     def __hash__(self):
         return hash(tuple.__add__((self.__class__,), self.args))
@@ -133,9 +130,7 @@ class ReferenceExpr(_ExprNode):
         return '{%s}' % _compactrepr(self.offset)
 
 class LinearExpr(_ExprNode, tuple):
-    __slots__ = ()
-
-    def __new__(cls, *terms):
+    def __gen__(cls, *terms):
         # normalize terms as (const, (coeff1, term1), (coeff2, term2), ...)
         const = 0
         termsmap = {}
@@ -212,9 +207,7 @@ class LinearExpr(_ExprNode, tuple):
         return terms
 
 class MultiplyExpr(_ExprNode, tuple):
-    __slots__ = ()
-
-    def __new__(cls, *terms):
+    def __gen__(cls, *terms):
         # filter integral terms here.
         factor = 1
         realterms = []
@@ -263,7 +256,7 @@ class MultiplyExpr(_ExprNode, tuple):
 class DivisionExpr(_ExprNode):
     __slots__ = ('lhs', 'rhs')
 
-    def __new__(cls, lhs, rhs):
+    def __gen__(cls, lhs, rhs):
         try: rvalue = int(rhs)
         except: pass
         else:
@@ -274,7 +267,7 @@ class DivisionExpr(_ExprNode):
             else:
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(cls)
+        return NotImplemented
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -301,7 +294,7 @@ class DivisionExpr(_ExprNode):
 class ExactDivisionExpr(_ExprNode):
     __slots__ = ('lhs', 'rhs')
 
-    def __new__(cls, lhs, rhs):
+    def __gen__(cls, lhs, rhs):
         try: rvalue = int(rhs)
         except: pass
         else:
@@ -314,7 +307,7 @@ class ExactDivisionExpr(_ExprNode):
                         'exact division failed: %r / %r' % (lvalue, rvalue)
                 return LinearExpr(lvalue // rvalue)
 
-        return _ExprNode.__new__(cls)
+        return NotImplemented
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs
@@ -341,7 +334,7 @@ class ExactDivisionExpr(_ExprNode):
 class ModuloExpr(_ExprNode):
     __slots__ = ('lhs', 'rhs')
 
-    def __new__(cls, lhs, rhs):
+    def __gen__(cls, lhs, rhs):
         try:
             rvalue = int(rhs)
             lvalue = int(lhs)
@@ -350,7 +343,7 @@ class ModuloExpr(_ExprNode):
         else:
             return LinearExpr(int(lhs) % rvalue)
 
-        return _ExprNode.__new__(cls)
+        return NotImplemented
 
     def __init__(self, lhs, rhs):
         self.lhs = lhs

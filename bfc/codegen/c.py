@@ -101,13 +101,11 @@ class Generator(BaseGenerator):
             return '1'
         elif isinstance(cond, Never):
             return '0'
-        elif isinstance(cond, MemNotEqual):
+        elif isinstance(cond, NotEqual):
             if cond.value == 0:
-                return 'p[%d]' % cond.target
+                return self.generateexpr(cond.expr)
             else:
-                return 'p[%d] != %d' % (cond.target, cond.value)
-        elif isinstance(cond, ExprNotEqual):
-            return '%s != %d' % (self.generateexpr(cond.expr), cond.value)
+                return '%s != %d' % (self.generateexpr(cond.expr), cond.value)
         else:
             assert False
 
