@@ -44,8 +44,6 @@ class Condition(genobject):
         return '<Cond: %s>' % self.compactrepr()
 
 class Always(Condition):
-    __slots__ = ()
-
     @property
     def args(self):
         return ()
@@ -54,8 +52,6 @@ class Always(Condition):
         return 'True'
 
 class Never(Condition):
-    __slots__ = ()
-
     def __nonzero__(self):
         return False
 
@@ -76,11 +72,20 @@ class NotEqual(Condition):
                 return Always()
             else:
                 return Never()
+        elif isinstance(expr, ReferenceExpr):
+            if expr.offset.simple():
+                return MemNotEqual(int(expr.offset), value)
         elif isinstance(expr, LinearExpr):
             if expr[0] != 0:
                 return NotEqual(LinearExpr(*expr[1:]), value - expr[0])
-        elif isinstance(expr, ReferenceExpr) and expr.offset.simple():
-            return MemNotEqual(int(expr.offset), value)
+            elif len(expr) == 2: # 0 + coeff * term
+                if abs(value) % abs(expr[1][0]) == 0:
+                    return NotEqual(expr[1][1], value // expr[1][0])
+                else:
+                    return Always()
+        elif isinstance(expr, ExactDivisionExpr):
+            if expr.rhs.simple():
+                return NotEqual(expr.lhs, value * int(expr.rhs))
 
         return NotImplemented
 
@@ -126,4 +131,35 @@ class MemNotEqual(NotEqual):
     @property
     def target(self):
         return self.expr.offset
+
+class NotBetween(Condition):
+    __slots__ = ('expr', 'min', 'max')
+
+    def __init__(self, expr, min, max):
+        self.expr = Expr(expr)
+        self.min = min
+        self.max = max
+
+    @property
+    def args(self):
+        return (self.expr, self.min, self.max)
+
+    def references(self):
+        return self.expr.references()
+
+    def movepointer(self, offset):
+        return Between(self.expr.movepointer(offset), self.min, self.max)
+
+    def withmemory(self, map):
+        expr = self.expr.withmemory(map)
+        if isinstance(expr, LinearExpr):
+            # a0 + a1 * x1 + ... + an * xn
+            pass
+        elif isinstance(expr, MultiplyExpr):
+            pass
+        else:
+            return ExprBetween(expr, self.min, self.max)
+
+    def compactrepr(self):
+        return '%r<=%s<=%r' % (self.min, self.expr.compactrepr(), self.max)
 

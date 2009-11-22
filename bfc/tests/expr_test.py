@@ -1,6 +1,7 @@
 # This is a part of Esotope Brainfuck Compiler.
 
 from bfc.expr import *
+from bfc.tests.utils import *
 
 class TestExprOps:
     def test_init_number(self):
@@ -80,6 +81,7 @@ class TestExprOps:
         assert (Expr[3] + 7) - Expr[3] == 7
         assert Expr[3] + Expr[3] == 2 * Expr[3]
         assert Expr[3] + Expr[3] - 7 * Expr[3] == -5 * Expr[3]
+        assert (Expr[3] * 4 + 5) * 6 - 7 == Expr[3] * 24 + 23
 
     def test_neg(self):
         assert -Expr(7) == -7
@@ -87,4 +89,29 @@ class TestExprOps:
         assert -(-(-Expr[7])) == -Expr[7]
         assert -(Expr[3] + Expr[5]) == (-Expr[3]) + (-Expr[5])
         assert -(7 * Expr[3] - 4 * Expr[5]) == 4 * Expr[5] - 7 * Expr[3]
+
+    def test_exactdiv(self):
+        raises(ValueError, '''Expr(407) / 4''')
+        assert Expr(408) / 4 == 102
+        raises(ValueError, '''Expr(409) / 4''')
+        assert Expr(0) / 4 == 0
+        assert Expr[6] / 1 == Expr[6]
+        assert Expr[6] / -1 == -Expr[6]
+        assert Expr[6] / 2 == (Expr[6] + 3 - 3) / 2
+
+    def test_div(self):
+        assert Expr(407) // 4 == 101
+        assert Expr(408) // 4 == 102
+        assert Expr(409) // 4 == 102
+        assert Expr(0) // 4 == 0
+        assert Expr[6] // 1 == Expr[6]
+        assert Expr[6] // -1 == -Expr[6]
+        assert Expr[6] // 2 == (Expr[6] + 3 - 3) // 2
+
+    def test_mod(self):
+        assert Expr(407) % 4 == 3
+        assert Expr(408) % 4 == 0
+        assert Expr(409) % 4 == 1
+        assert Expr(0) % 4 == 0
+        assert Expr[6] % 2 == (Expr[6] + 3 - 3) % 2
 
