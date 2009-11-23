@@ -36,6 +36,7 @@ class TestExprOps:
         assert (Expr(3) // Expr(4)).simple()
         assert (Expr(3) % Expr(4)).simple()
         for u in xrange(-9, 10):
+            assert Expr(u) == u
             for v in xrange(-9, 10):
                 assert (Expr(u) + Expr(v)) == (u+v)
                 assert (Expr(u) + v) == (u+v)
@@ -53,6 +54,10 @@ class TestExprOps:
                     assert (Expr(u) % Expr(v)) == (u%v)
                     assert (Expr(u) % v) == (u%v)
                     assert (u % Expr(v)) == (u%v)
+            if u == 0:
+                assert not Expr(u)
+            else:
+                assert Expr(u)
 
     def test_add(self):
         assert Expr[4] + 0 == Expr[4]
@@ -64,6 +69,7 @@ class TestExprOps:
         assert Expr[4] - Expr[4] == 0
         assert (-Expr[4]) + Expr[4] == 0
         assert (Expr[4] + 7) + 9 == Expr[4] + 16
+        assert Expr[4] + 5 and Expr[4] - 5
 
     def test_mul(self):
         assert Expr[4] * 0 == 0
@@ -74,6 +80,7 @@ class TestExprOps:
         assert (Expr[1] * Expr[2]) * (Expr[3] * Expr[4]) == \
                 Expr[1] * (Expr[2] * Expr[3]) * Expr[4]
         assert 4 * (Expr[5] * 5) == 20 * Expr[5]
+        assert Expr[1] * Expr[2] * Expr[3] * Expr[4]
 
     def test_add_linear(self):
         assert Expr[3] * 4 + Expr[3] * 5 == Expr[3] * 9
@@ -89,6 +96,7 @@ class TestExprOps:
         assert -(-(-Expr[7])) == -Expr[7]
         assert -(Expr[3] + Expr[5]) == (-Expr[3]) + (-Expr[5])
         assert -(7 * Expr[3] - 4 * Expr[5]) == 4 * Expr[5] - 7 * Expr[3]
+        assert -Expr[3]
 
     def test_exactdiv(self):
         raises(ValueError, '''Expr(407) / 4''')
@@ -98,6 +106,7 @@ class TestExprOps:
         assert Expr[6] / 1 == Expr[6]
         assert Expr[6] / -1 == -Expr[6]
         assert Expr[6] / 2 == (Expr[6] + 3 - 3) / 2
+        assert Expr[6] / 5
 
     def test_div(self):
         assert Expr(407) // 4 == 101
@@ -107,6 +116,7 @@ class TestExprOps:
         assert Expr[6] // 1 == Expr[6]
         assert Expr[6] // -1 == -Expr[6]
         assert Expr[6] // 2 == (Expr[6] + 3 - 3) // 2
+        assert Expr[6] // 5
 
     def test_mod(self):
         assert Expr(407) % 4 == 3
@@ -114,4 +124,5 @@ class TestExprOps:
         assert Expr(409) % 4 == 1
         assert Expr(0) % 4 == 0
         assert Expr[6] % 2 == (Expr[6] + 3 - 3) % 2
+        assert Expr[6] % 5
 

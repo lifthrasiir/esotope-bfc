@@ -55,24 +55,45 @@ class Expr(genobject):
     def __rmod__(rhs, lhs): return ModuloExpr(lhs, rhs)
 
     def simple(self):
+        """Returns True if the expression reduces to single integer."""
+
         return False
 
     def references(self):
-        """Returns the set of memory cells (possibly other Expr) the current
-        expression references."""
+        """Returns the set of memory cells (possibly other Expr or variable
+        symbols) the current expression references."""
 
-        return frozenset()
+        raise NotImplementedError # pragma: no cover
 
-    def movepointer(self, delta):
-        return self
+    def movepointer(self, offset):
+        """Returns new expression with all memory reference is shifted by given
+        offset. For example, {3} shifted by 4 is {7} and {{5}+6} shifted by -1
+        is {{4}+5}."""
+
+        raise NotImplementedError # pragma: no cover
 
     def withmemory(self, map):
-        return self
+        """Returns new expression with all memory reference present in the
+        given map replaced by its value. The map is mapping from memory
+        offset to its current value. The result is automatically
+        canonicalized."""
+
+        raise NotImplementedError # pragma: no cover
+
+    def compactrepr(self, prec=0):
+        """Returns a compact string notation of this expression. The additional
+        argument, if any, is a precedence of outer node, and used for correct
+        parenthesizing. (Hint: with sufficient large prec value almost all
+        expression will be parenthesized.)"""
+
+        raise NotImplementedError # pragma: no cover
 
     def __repr__(self):
         return '<Expr: %s>' % self.compactrepr()
 
 class _ExprNode(Expr):
+    """Base class for every expression node."""
+
     __gen__ = genobject.__gen__
 
     def __hash__(self):
@@ -87,6 +108,13 @@ class _ExprNode(Expr):
         return type(lhs) != type(rhs) or lhs.args != rhs.args
 
 class ReferenceExpr(_ExprNode):
+    """Memory reference node (notation: {expr}).
+
+    There is no other information about referenced cell. For example, there
+    is no indication of range of the cell's value. If you really want it,
+    you have to substitute all memory references {k} with {k}%cellsize.
+    """
+
     __slots__ = ('offset',)
 
     def __init__(self, offset):
@@ -99,8 +127,8 @@ class ReferenceExpr(_ExprNode):
     def references(self):
         return frozenset([self.offset])
 
-    def movepointer(self, delta):
-        return ReferenceExpr(self.offset.movepointer(delta) + delta)
+    def movepointer(self, offset):
+        return ReferenceExpr(self.offset.movepointer(offset) + offset)
 
     def withmemory(self, map):
         newoffset = self.offset.withmemory(map)
@@ -114,6 +142,15 @@ class ReferenceExpr(_ExprNode):
         return '{%s}' % self.offset.compactrepr()
 
 class LinearExpr(_ExprNode, tuple):
+    """Linear combination node (notation: expr+expr, expr-expr, k*expr,
+    -expr, +expr and Expr(number)).
+
+    All linear combination of complex terms is represented as this node.
+    For example, ({3}-{4}/2)*5+6 is equivalent to 6+5*{3}-5*({4}/2) and
+    internally stored as (6, (5, {3}), (-5, {4}/2)). If there is only one term,
+    it should be an integer constant.
+    """
+
     def __gen__(cls, *terms):
         # normalize terms as (const, (coeff1, term1), (coeff2, term2), ...)
         const = 0
@@ -167,8 +204,8 @@ class LinearExpr(_ExprNode, tuple):
     def references(self):
         return reduce(_operator.or_, [k.references() for v, k in self[1:]], frozenset())
 
-    def movepointer(self, delta):
-        return LinearExpr(self[0], *[(v, k.movepointer(delta)) for v, k in self[1:]])
+    def movepointer(self, offset):
+        return LinearExpr(self[0], *[(v, k.movepointer(offset)) for v, k in self[1:]])
 
     def withmemory(self, map):
         return LinearExpr(self[0], *[(v, k.withmemory(map)) for v, k in self[1:]])
@@ -191,6 +228,12 @@ class LinearExpr(_ExprNode, tuple):
         return terms
 
 class MultiplyExpr(_ExprNode, tuple):
+    """Multiplication node (notation: expr*expr).
+
+    This node is used for complex multiplication, e.g. {3}*{4}. If there is
+    a constant factor it is represented as LinearExpr.
+    """
+
     def __gen__(cls, *terms):
         # filter integral terms here.
         factor = 1
@@ -226,18 +269,25 @@ class MultiplyExpr(_ExprNode, tuple):
     def references(self):
         return reduce(_operator.or_, [e.references() for e in self], frozenset())
 
-    def movepointer(self, delta):
-        return MultiplyExpr(*[e.movepointer(delta) for e in self])
+    def movepointer(self, offset):
+        return MultiplyExpr(*[e.movepointer(offset) for e in self])
 
     def withmemory(self, map):
         return MultiplyExpr(*[e.withmemory(map) for e in self])
 
     def compactrepr(self, prec=0):
         terms = '*'.join(e.compactrepr(2) for e in self)
-        if prec > 2 and len(expr) > 1: terms = '(%s)' % terms
+        if prec > 2 and len(self) > 1: terms = '(%s)' % terms
         return terms
 
 class DivisionExpr(_ExprNode):
+    """Floor division node (notation: expr//expr).
+
+    It denotes floor(lhs/rhs). ExactDivisionExpr is used for exact division,
+    that is, lhs is known to be a multiple of rhs.
+    """
+    # XXX consistent semantics for negative dividend and divisor
+
     __slots__ = ('lhs', 'rhs')
 
     def __gen__(cls, lhs, rhs):
@@ -264,8 +314,8 @@ class DivisionExpr(_ExprNode):
     def references(self):
         return self.lhs.references() | self.rhs.references()
 
-    def movepointer(self, delta):
-        return DivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+    def movepointer(self, offset):
+        return DivisionExpr(self.lhs.movepointer(offset), self.rhs.movepointer(offset))
 
     def withmemory(self, map):
         return DivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
@@ -276,6 +326,14 @@ class DivisionExpr(_ExprNode):
         return terms
 
 class ExactDivisionExpr(_ExprNode):
+    """Exact division node (notation: expr/expr).
+
+    ExactDivisionExpr differs from DivisionExpr, as this node requires that
+    lhs is divisible by rhs. Typically this assumption is asserted externally
+    (e.g. with If node in bfc.nodes module) and canonicalization fails if
+    this assumption is false.
+    """
+
     __slots__ = ('lhs', 'rhs')
 
     def __gen__(cls, lhs, rhs):
@@ -304,11 +362,13 @@ class ExactDivisionExpr(_ExprNode):
     def references(self):
         return self.lhs.references() | self.rhs.references()
 
-    def movepointer(self, delta):
-        return ExactDivisionExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+    def movepointer(self, offset):
+        return ExactDivisionExpr(self.lhs.movepointer(offset),
+                                 self.rhs.movepointer(offset))
 
     def withmemory(self, map):
-        return ExactDivisionExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))
+        return ExactDivisionExpr(self.lhs.withmemory(map),
+                                 self.rhs.withmemory(map))
 
     def compactrepr(self, prec=0):
         terms = '%s/%s' % (self.lhs.compactrepr(2), self.rhs.compactrepr(3))
@@ -316,6 +376,14 @@ class ExactDivisionExpr(_ExprNode):
         return terms
 
 class ModuloExpr(_ExprNode):
+    """Modulo node (notation: expr%expr).
+
+    From definition of floor division and modulo, (lhs//rhs)*rhs + (lhs%rhs) == lhs.
+    In the other words, lhs//rhs == (lhs - lhs%rhs)/rhs. (Note the difference of
+    floor division and exact division.)
+    """
+    # XXX consistent semantics for negative dividend and divisor
+
     __slots__ = ('lhs', 'rhs')
 
     def __gen__(cls, lhs, rhs):
@@ -340,8 +408,8 @@ class ModuloExpr(_ExprNode):
     def references(self):
         return self.lhs.references() | self.rhs.references()
 
-    def movepointer(self, delta):
-        return ModuloExpr(self.lhs.movepointer(delta), self.rhs.movepointer(delta))
+    def movepointer(self, offset):
+        return ModuloExpr(self.lhs.movepointer(offset), self.rhs.movepointer(offset))
 
     def withmemory(self, map):
         return ModuloExpr(self.lhs.withmemory(map), self.rhs.withmemory(map))

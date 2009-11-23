@@ -8,5 +8,5 @@ class BaseParser(object):
         return getattr(self.compiler, name)
 
     def parse(self, fp):
-        raise NotImplementedError
+        raise NotImplementedError # pragma: no cover
 

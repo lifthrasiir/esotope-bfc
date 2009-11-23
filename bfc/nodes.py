@@ -133,7 +133,7 @@ class Node(object):
         Moves all memory references in the node by given offset. This is an
         in-place operation."""
 
-        raise NotImplementedError
+        raise NotImplementedError # pragma: no cover
 
     # propagates known memory cells given.
     def withmemory(self, map):
@@ -160,7 +160,7 @@ class Node(object):
     def returns(self): return True
 
     def compactrepr(self):
-        raise NotImplementedError
+        raise NotImplementedError # pragma: no cover
 
     def __repr__(self):
         return self.compactrepr()
