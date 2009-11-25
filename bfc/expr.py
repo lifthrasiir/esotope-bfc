@@ -125,7 +125,7 @@ class ReferenceExpr(_ExprNode):
         return (self.offset,)
 
     def references(self):
-        return frozenset([self.offset])
+        return frozenset([self.offset]) | self.offset.references()
 
     def movepointer(self, offset):
         return ReferenceExpr(self.offset.movepointer(offset) + offset)
@@ -133,7 +133,7 @@ class ReferenceExpr(_ExprNode):
     def withmemory(self, map):
         newoffset = self.offset.withmemory(map)
         try:
-            if newoffset.simple(): return Expr(map[newoffset])
+            if newoffset.simple(): return Expr(map[newoffset]).withmemory(map)
         except KeyError:
             pass
         return ReferenceExpr(newoffset)
