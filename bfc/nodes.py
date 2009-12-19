@@ -119,6 +119,21 @@ class Node(object):
 
         return True
 
+    def __hash__(self):
+        return hash(tuple.__add__((self.__class__,), self.args))
+
+    def __eq__(lhs, rhs):
+        return type(lhs) == type(rhs) and lhs.args == rhs.args
+
+    def __ne__(lhs, rhs):
+        return type(lhs) != type(rhs) or lhs.args != rhs.args
+
+    @property
+    def args(self):
+        """(Normalized) arguments passed to the object's constructor."""
+
+        raise NotImplementedError # pragma: no cover
+
     def pure(self):
         """node.pure() -> bool
 
@@ -245,6 +260,10 @@ class Program(ComplexNode):
     def compactrepr(self):
         return 'Program[%s]' % self._innerrepr()
 
+    @property
+    def args(self):
+        return list(self)
+
 class Nop(Node):
     """Nop node.
 
@@ -258,6 +277,10 @@ class Nop(Node):
     def compactrepr(self):
         return 'Nop[]'
 
+    @property
+    def args(self):
+        return ()
+
 class UseVariable(ComplexNode):
     def __init__(self, vars, children=[]):
         ComplexNode.__init__(self, children)
@@ -265,6 +288,10 @@ class UseVariable(ComplexNode):
 
     def __nonzero__(self):
         return len(self) > 0
+
+    @property
+    def args(self):
+        return self.vars, list(children)
 
     offsets = ComplexNode.stride
     prereferences = ComplexNode.bodyprereferences
@@ -298,6 +325,10 @@ class SetMemory(Node):
 
     def __nonzero__(self):
         return self.value != Expr[self.offset]
+
+    @property
+    def args(self):
+        return (self.offset, self.value)
 
     def _get_delta(self):
         return self.value - Expr[self.offset]
@@ -361,6 +392,10 @@ class MovePointer(Node):
     def __nonzero__(self):
         return self.offset != 0
 
+    @property
+    def args(self):
+        return (self.offset,)
+
     def movepointer(self, offset):
         pass # no change
 
@@ -381,6 +416,10 @@ class Input(Node):
 
     def __init__(self, offset):
         self.offset = offset
+
+    @property
+    def args(self):
+        return (self.offset,)
 
     def pure(self):
         return False
@@ -406,6 +445,10 @@ class Output(Node):
 
     def __init__(self, expr):
         self.expr = Expr(expr)
+
+    @property
+    def args(self):
+        return (self.expr,)
 
     def pure(self):
         return False
@@ -440,6 +483,10 @@ class OutputConst(Node):
     def __nonzero__(self):
         return len(self.str) > 0
 
+    @property
+    def args(self):
+        return (self.str,)
+
     def pure(self):
         return False
 
@@ -464,6 +511,10 @@ class SeekMemory(Node):
         self.target = target
         self.stride = stride
         self.value = value
+
+    @property
+    def args(self):
+        return (self.target, self.stride, self.value)
 
     def offsets(self):
         return None
@@ -502,6 +553,10 @@ class If(ComplexNode):
 
     def __nonzero__(self):
         return bool(self.cond) and len(self) > 0
+
+    @property
+    def args(self):
+        return (self.cond, list(self))
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
@@ -551,6 +606,10 @@ class Repeat(ComplexNode):
 
     def __nonzero__(self):
         return bool(self.count) and len(self) > 0
+
+    @property
+    def args(self):
+        return (self.count, list(self))
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)
@@ -614,6 +673,10 @@ class While(ComplexNode):
     def __nonzero__(self):
         # infinite loop should return True, even if there are no children.
         return bool(self.cond)
+
+    @property
+    def args(self):
+        return (self.cond, list(self))
 
     def movepointer(self, offset):
         ComplexNode.movepointer(self, offset)

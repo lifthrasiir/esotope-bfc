@@ -3,7 +3,7 @@
 from bfc.expr import *
 from bfc.cond import *
 
-class TestExprOps:
+class TestCondOps:
     def test_always_never(self):
         always = Always()
         never = Never()
