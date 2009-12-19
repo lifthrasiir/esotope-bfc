@@ -3,6 +3,20 @@
 import operator as _operator
 from bfc.utils import *
 
+def _withmemory_propagate(map):
+    """Tries to propagate the given substitution map so that any non-recursive
+    substitutions don't refer to memory cell present in the map. The original
+    map is altered in-place.
+
+    It is internally used in Expr.withmemory method."""
+
+    copied = map.copy()
+    for k, v in copied.items():
+        del copied[k]
+        map[k] = Expr(v).withmemory(copied)
+        copied[k] = v
+    return map
+
 class _ExprMeta(gentype):
     """Metaclass of Expr. Used to implement Expr[] syntax."""
 
@@ -131,9 +145,9 @@ class ReferenceExpr(_ExprNode):
         return ReferenceExpr(self.offset.movepointer(offset) + offset)
 
     def withmemory(self, map):
-        newoffset = self.offset.withmemory(map)
+        newoffset = self.offset.withmemory(_withmemory_propagate(map))
         try:
-            if newoffset.simple(): return Expr(map[newoffset]).withmemory(map)
+            if newoffset.simple(): return map[newoffset]
         except KeyError:
             pass
         return ReferenceExpr(newoffset)
@@ -298,6 +312,7 @@ class DivisionExpr(_ExprNode):
             except:
                 if rvalue == 1: return lhs
                 if rvalue == -1: return -lhs
+                if rvalue < 0: return (-lhs) // (-rvalue)
             else:
                 return LinearExpr(lvalue // rvalue)
 
@@ -344,6 +359,7 @@ class ExactDivisionExpr(_ExprNode):
             except:
                 if rvalue == 1: return lhs
                 if rvalue == -1: return -lhs
+                if rvalue < 0: return (-lhs) / (-rvalue)
             else:
                 if lvalue % rvalue != 0:
                     raise ValueError('exact division failed: %r / %r' % (lvalue, rvalue))

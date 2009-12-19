@@ -105,6 +105,7 @@ class TestExprOps:
         assert Expr(0) / 4 == 0
         assert Expr[6] / 1 == Expr[6]
         assert Expr[6] / -1 == -Expr[6]
+        assert Expr[6] / -2 == (-Expr[6]) / 2
         assert Expr[6] / 2 == (Expr[6] + 3 - 3) / 2
         assert Expr[6] / 5
 
@@ -115,6 +116,7 @@ class TestExprOps:
         assert Expr(0) // 4 == 0
         assert Expr[6] // 1 == Expr[6]
         assert Expr[6] // -1 == -Expr[6]
+        assert Expr[6] // -2 == (-Expr[6]) // 2
         assert Expr[6] // 2 == (Expr[6] + 3 - 3) // 2
         assert Expr[6] // 5
 
@@ -158,7 +160,8 @@ class TestExprOps:
         assert Expr(42).withmemory({1:2, 3:4}) == Expr(42)
         assert Expr[42].withmemory({1:2, 3:4}) == Expr[42]
         assert Expr[42].withmemory({42:54}) == 54
-        assert Expr[42].withmemory({42:Expr[54], 54:-1}) == -1
+        assert Expr[42].withmemory({42:Expr[54], 54:-1}) == -1 # transitive subst.
+        assert Expr[42].withmemory({42:Expr[42]-4}) == Expr[42] - 4 # recursive subst.
         assert Expr[42+Expr[54]].withmemory({54:6}) == Expr[48]
         assert Expr[42+Expr[54]].withmemory({54:6, 48:7}) == 7
         assert Expr[Expr[1]+Expr[2]].withmemory({1:3, 2:-1}) == -1
