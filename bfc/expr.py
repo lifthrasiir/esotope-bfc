@@ -3,20 +3,6 @@
 import operator as _operator
 from bfc.utils import *
 
-def _withmemory_propagate(map):
-    """Tries to propagate the given substitution map so that any non-recursive
-    substitutions don't refer to memory cell present in the map. The original
-    map is altered in-place.
-
-    It is internally used in Expr.withmemory method."""
-
-    copied = map.copy()
-    for k, v in copied.items():
-        del copied[k]
-        map[k] = Expr(v).withmemory(copied)
-        copied[k] = v
-    return map
-
 class _ExprMeta(gentype):
     """Metaclass of Expr. Used to implement Expr[] syntax."""
 
@@ -145,9 +131,14 @@ class ReferenceExpr(_ExprNode):
         return ReferenceExpr(self.offset.movepointer(offset) + offset)
 
     def withmemory(self, map):
-        newoffset = self.offset.withmemory(_withmemory_propagate(map))
+        newoffset = self.offset.withmemory(map)
         try:
-            if newoffset.simple(): return map[newoffset]
+            if newoffset.simple():
+                # XXX that really has to be transitive closure, but we're
+                # not sure how to deal the recursive assignments.
+                remap = map.copy()
+                del remap[newoffset]
+                return Expr(map[newoffset]).withmemory(remap)
         except KeyError:
             pass
         return ReferenceExpr(newoffset)
