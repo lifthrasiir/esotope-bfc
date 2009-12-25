@@ -59,6 +59,12 @@ class Expr(genobject):
 
         return False
 
+    def inverse(self, offset):
+        """Assuming the assignment {offset}=expr, calculates the inverse
+        assignment {offset}=invexpr. Returns None if it is impossible."""
+
+        return None
+
     def references(self):
         """Returns the set of memory cells (possibly other Expr or variable
         symbols) the current expression references."""
@@ -123,6 +129,12 @@ class ReferenceExpr(_ExprNode):
     @property
     def args(self):
         return (self.offset,)
+
+    def inverse(self, offset):
+        # f(x) = x  <->  f~(x) = x
+        # if f(x) = y (no {x} present in f(x)), it's not invertible.
+        if self.offset != offset: return None
+        return self
 
     def references(self):
         return frozenset([self.offset]) | self.offset.references()
@@ -206,6 +218,21 @@ class LinearExpr(_ExprNode, tuple):
         assert len(self) == 1
         return self[0]
 
+    def inverse(self, offset):
+        # f(x) = a * g(x) + b  <->  f~(x) = g~((x - b) / a)
+        # g(x) must present exactly once in f(x).
+        vary = []
+        const = self[0]
+        for coeff, term in self[1:]:
+            if offset in term.references():
+                vary.append((coeff, term))
+            else:
+                const += coeff * term
+        if len(vary) != 1: return None
+        inv = vary[0][1].inverse(offset)
+        if inv is None: return None
+        return inv.withmemory({offset: (Expr[offset] - const) / vary[0][0]})
+
     def references(self):
         return reduce(_operator.or_, [k.references() for v, k in self[1:]], frozenset())
 
@@ -270,6 +297,20 @@ class MultiplyExpr(_ExprNode, tuple):
     @property
     def args(self):
         return tuple(self)
+
+    def inverse(self, offset):
+        # f(x) = g(x) * y  <->  f~(x) = g~(x / y)
+        vary = []
+        const = Expr(1)
+        for factor in self:
+            if offset in factor.references():
+                vary.append(factor)
+            else:
+                const *= factor
+        if len(vary) != 1: return None
+        inv = vary[0].inverse(offset)
+        if inv is None: return None
+        return inv.withmemory({offset: Expr[offset] / const})
 
     def references(self):
         return reduce(_operator.or_, [e.references() for e in self], frozenset())
@@ -365,6 +406,22 @@ class ExactDivisionExpr(_ExprNode):
     @property
     def args(self):
         return (self.lhs, self.rhs)
+
+    def inverse(self, offset):
+        # f(x) = g(x) / y  <->  f~(x) = g~(x * y)
+        # f(x) = y / g(x)  <->  f~(x) = g~(y / x)
+        lhs = self.lhs
+        rhs = self.rhs
+        if offset in lhs.references():
+            if offset in rhs.references(): return None
+            inv = lhs.inverse(offset)
+            if inv is None: return None
+            return inv.withmemory({offset: Expr[offset] * rhs})
+        else:
+            if offset not in rhs.references(): return None
+            inv = rhs.inverse(offset)
+            if inv is None: return None
+            return inv.withmemory({offset: lhs / Expr[offset]})
 
     def references(self):
         return self.lhs.references() | self.rhs.references()
