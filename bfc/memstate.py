@@ -72,60 +72,6 @@ class MemoryState(object):
                 backrefs.setdefault(ref, set()).update(backrefs[offset])
             if offset not in refs: del backrefs[offset]
 
-    def __inverse(self, offset, expr):
-        if isinstance(expr, ReferenceExpr):
-            # f(x) = x  <->  f~(x) = x
-            # if f(x) = y (no {x} present in f(x)), it's not invertible.
-            if expr.offset != offset: return None
-            return expr
-
-        if isinstance(expr, LinearExpr):
-            # f(x) = a * g(x) + b  <->  f~(x) = g~((x - b) / a)
-            # g(x) must present exactly once in f(x).
-            vary = []
-            const = expr[0]
-            for coeff, term in expr[1:]:
-                if offset in term.references():
-                    vary.append((coeff, term))
-                else:
-                    const += coeff * term
-            if len(vary) != 1: return None
-            inv = self.__inverse(offset, vary[0][1])
-            if inv is None: return None
-            return inv.withmemory({offset: (Expr[offset] - const) / vary[0][0]})
-
-        if isinstance(expr, MultiplyExpr):
-            # f(x) = g(x) * y  <->  f~(x) = g~(x / y)
-            vary = []
-            const = Expr(1)
-            for factor in expr:
-                if offset in factor.references():
-                    vary.append(factor)
-                else:
-                    const *= factor
-            if len(vary) != 1: return None
-            inv = self.__inverse(offset, vary[0])
-            if inv is None: return None
-            return inv.withmemory({offset: Expr[offset] / const})
-
-        if isinstance(expr, ExactDivisionExpr):
-            # f(x) = g(x) / y  <->  f~(x) = g~(x * y)
-            # f(x) = y / g(x)  <->  f~(x) = g~(y / x)
-            lhs = expr.lhs
-            rhs = expr.rhs
-            if offset in lhs.references():
-                if offset in rhs.references(): return None
-                inv = self.__inverse(offset, lhs)
-                if inv is None: return None
-                return inv.withmemory({offset: Expr[offset] * rhs})
-            else:
-                if offset not in rhs.references(): return None
-                inv = self.__inverse(offset, rhs)
-                if inv is None: return None
-                return inv.withmemory({offset: lhs / Expr[offset]})
-
-        return None
-
     def set(self, offset, expr):
         if not Expr(offset).simple(): # XXX ignore for now
             flushed = self.flush()
@@ -142,7 +88,7 @@ class MemoryState(object):
         if offset in expr.references():
             assert offset not in memory # invariant
 
-            invexpr = self.__inverse(offset, expr)
+            invexpr = expr.inverse(offset)
             if invexpr is not None:
                 # expr references itself but invertible. we can substitute all
                 # references of {offset} in memory with inverted expr safely.
