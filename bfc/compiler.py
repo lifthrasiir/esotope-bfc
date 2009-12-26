@@ -29,8 +29,10 @@ class Compiler(object):
             opt.simpleloop.OptimizerPass,
             opt.initialmemory.OptimizerPass,
             opt.propagate.OptimizerPass,
+            opt.moreloop.OptimizerPass,
             opt.simpleloop.OptimizerPass,
             opt.propagate.OptimizerPass,
+            opt.moreloop.OptimizerPass,
             opt.removedead.OptimizerPass,
             opt.stdlib.OptimizerPass,
         ]

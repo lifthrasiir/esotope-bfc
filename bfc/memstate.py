@@ -132,6 +132,12 @@ class MemoryState(object):
             nodes.append(SetMemory(offset, value))
         return nodes
 
+    def copy(self):
+        state = MemoryState()
+        state.memory = self.memory.copy()
+        state.backrefs = dict((k, v.copy()) for k, v in self.backrefs.items())
+        return state
+
     def clear(self):
         self.memory.clear()
         self.backrefs.clear()

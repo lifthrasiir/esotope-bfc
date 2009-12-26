@@ -101,11 +101,34 @@ class Generator(BaseGenerator):
             return '1'
         elif isinstance(cond, Never):
             return '0'
+        elif isinstance(cond, Equal):
+            if cond.value == 0:
+                return '!' + self.generateexpr(cond.expr)
+            else:
+                return '%s == %d' % (self.generateexpr(cond.expr), cond.value)
         elif isinstance(cond, NotEqual):
             if cond.value == 0:
                 return self.generateexpr(cond.expr)
             else:
                 return '%s != %d' % (self.generateexpr(cond.expr), cond.value)
+        elif isinstance(cond, Range):
+            expr = self.generateexpr(cond.expr)
+            terms = []
+            for min, max in cond.ranges:
+                if min is None:
+                    terms.append('%s <= %d' % (expr, max))
+                elif max is None:
+                    terms.append('%d <= %s' % (min, expr))
+                else:
+                    terms.append('%d <= %s <= %d' % (min, expr, max))
+            if len(terms) == 1:
+                return terms[0]
+            else:
+                return '(%s)' % ' || '.join(terms)
+        elif isinstance(cond, Conjunction):
+            return '(%s)' % ' && '.join(map(self.generateexpr, cond))
+        elif isinstance(cond, Disjunction):
+            return '(%s)' % ' || '.join(map(self.generateexpr, cond))
         else:
             assert False
 
