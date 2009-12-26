@@ -123,11 +123,12 @@ class Generator(BaseGenerator):
             elif value == -1:
                 return '--%s' % ref
 
-        s = self.generateexpr(value)
-        if s.startswith('-'):
-            return '%s -= %s' % (ref, s[1:])
+        posform = '%s += %s' % (ref, self.generateexpr(value))
+        negform = '%s -= %s' % (ref, self.generateexpr(-value))
+        if len(negform) < len(posform):
+            return negform
         else:
-            return '%s += %s' % (ref, s)
+            return posform
 
     _reprmap = [('\\%03o', '%c')[32 <= i < 127] % i for i in xrange(256)]
     _reprmap[0] = '\\0'; _reprmap[9] = '\\t'; _reprmap[10] = '\\n'; _reprmap[13] = '\\r'
