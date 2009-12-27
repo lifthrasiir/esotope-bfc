@@ -49,6 +49,26 @@ class Generator(BaseGenerator):
 
     ############################################################
 
+    def adoptcond(self, cond):
+        if isinstance(cond, Range):
+            # p[x]~(...) actually means p[x+nW]~(...) for every integer n.
+            # XXX sub-optimal algorithm
+            cellsize = self.cellsize
+            multiples = set()
+            for min, max in cond.ranges:
+                if min is not None: multiples.add(min >> cellsize)
+                if max is not None: multiples.add((max-1) >> cellsize)
+            realranges = [Between(0, cond.expr, (1 << cellsize) - 1)]
+            for n in multiples:
+                realranges.append(Range(cond.expr + (n << cellsize), *cond.ranges))
+            return Conjunction(*realranges)
+        elif isinstance(cond, Conjunction):
+            return Conjunction(*map(self.adoptcond, cond))
+        elif isinstance(cond, Disjunction):
+            return Disjunction(*map(self.adoptcond, cond))
+        else:
+            return cond
+
     def _generateexpr(self, expr, prec=0):
         _generateexpr = self._generateexpr
 
@@ -119,8 +139,10 @@ class Generator(BaseGenerator):
                     terms.append('%s <= %d' % (expr, max))
                 elif max is None:
                     terms.append('%d <= %s' % (min, expr))
+                elif min == max:
+                    terms.append('%s == %d' % (expr, min))
                 else:
-                    terms.append('%d <= %s <= %d' % (min, expr, max))
+                    terms.append('(%d <= %s && %s <= %d)' % (min, expr, expr, max))
             if len(terms) == 1:
                 return terms[0]
             else:
@@ -221,7 +243,7 @@ class Generator(BaseGenerator):
         if self.debugging:
             self.dumpcomplex(self)
 
-        self.write('if (%s) {' % self.generatecond(node.cond))
+        self.write('if (%s) {' % self.generatecond(self.adoptcond(node.cond)))
         self._generatenested(node)
         self.write('}')
 
@@ -247,7 +269,7 @@ class Generator(BaseGenerator):
         if isinstance(node.cond, Always) and len(node) == 0:
             self.write('while (1); /* infinite loop */')
         else:
-            self.write('while (%s) {' % self.generatecond(node.cond))
+            self.write('while (%s) {' % self.generatecond(self.adoptcond(node.cond)))
             self._generatenested(node)
             self.write('}')
 
