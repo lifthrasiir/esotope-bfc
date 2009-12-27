@@ -78,15 +78,8 @@ class OptimizerPass(BaseOptimizerPass):
                         target = backrefs[offset]
                         if target >= usedrefs.get(offset, -1) and \
                                 all(target >= backrefs.get(ioffset, -1) for ioffset in refs):
-                            if isinstance(cur, SetMemory) and cur.delta.simple():
-                                if node[target].delta.simple():
-                                    node[target].value += cur.delta
-                                else:
-                                    node[target].delta += cur.delta
-                                if not node[target]:
-                                    node[target] = Nop()
-                            else:
-                                node[target] = cur
+                            assume = {offset: node[target].value}
+                            node[target].value = cur.value.withmemory(assume)
                             tr.replace()
                             merged = True
 
