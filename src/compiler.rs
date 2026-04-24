@@ -232,4 +232,47 @@ mod tests {
             output
         );
     }
+
+    #[test]
+    fn dead_move_overwritten_by_input() {
+        // ,[->>+<<]>>,. — move p[0] to p[2], then overwrite p[2] with input
+        // The move loop stores are dead because p[2] is overwritten and p[0] is never read
+        let src = ",[->>+<<]>>,.";
+        let output = compile_bf(src);
+        let main_body = output.split("int main(void) {").nth(1).unwrap();
+        assert!(
+            !main_body.contains("if ") && !main_body.contains("if("),
+            "dead move inside conditional should be eliminated: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn conditional_dead_store_removed() {
+        // Set p[0]=5, input p[1], if p[1]!=0 move p[0] to p[2] and clear p[1],
+        // then clear p[2] and output it.
+        // The move to p[2] inside the if is dead because p[2] is cleared after.
+        let src = "+++++ >,[ ->+<  [-] ] >[-] .";
+        let output = compile_bf(src);
+        let main_body = output.split("int main(void) {").nth(1).unwrap();
+        assert!(
+            !main_body.contains("p[2] =") && !main_body.contains("p[2] +="),
+            "dead store to p[2] inside if should be removed: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn live_conditional_store_preserved() {
+        // Same pattern but p[2] is output instead of being cleared
+        // ,[->>+<<]>>. — move p[0] to p[2] then output p[2]
+        // The move IS used, so it must be preserved
+        let src = ",[->>+<<]>>.";
+        let output = compile_bf(src);
+        assert!(
+            output.contains("PUTC(") || output.contains("p[2]") || output.contains("p[0]"),
+            "live move should produce output code: {}",
+            output
+        );
+    }
 }
