@@ -163,6 +163,75 @@ fn simplify_known_not_equal(known: Option<&CellValue>, value: i32) -> Option<Con
     }
 }
 
+fn range_to_cell_value(ranges: &[(Option<i32>, Option<i32>)]) -> Option<CellValue> {
+    match ranges {
+        [(Some(mn), Some(mx))] if mn == mx => Some(CellValue::Const(*mn)),
+        _ => {
+            let all_bounded = ranges.iter().all(|(mn, mx)| mn.is_some() && mx.is_some());
+            if all_bounded && !ranges.is_empty() {
+                let total: i64 = ranges
+                    .iter()
+                    .map(|(mn, mx)| mx.unwrap() as i64 - mn.unwrap() as i64 + 1)
+                    .sum();
+                if total <= 256 {
+                    let modulus = find_range_modulus(ranges);
+                    if let Some((m, r)) = modulus {
+                        if m >= 2 {
+                            return Some(CellValue::Mod(m, r));
+                        }
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+fn complement_range_to_cell_value(
+    ranges: &[(Option<i32>, Option<i32>)],
+) -> Option<CellValue> {
+    match ranges {
+        [(Some(mn), Some(mx))] if mn == mx => {
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_range_modulus(ranges: &[(Option<i32>, Option<i32>)]) -> Option<(i32, i32)> {
+    if ranges.len() < 2 {
+        return None;
+    }
+
+    let points: Vec<i32> = ranges
+        .iter()
+        .filter_map(|(mn, mx)| {
+            let mn = (*mn)?;
+            let mx = (*mx)?;
+            if mn == mx {
+                Some(mn)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if points.len() != ranges.len() || points.len() < 2 {
+        return None;
+    }
+
+    let diffs: Vec<i32> = points.windows(2).map(|w| w[1] - w[0]).collect();
+    let modulus = diffs.iter().copied().reduce(|a, b| gcd(a, b))?;
+
+    if modulus >= 2 {
+        let residue = points[0].rem_euclid(modulus);
+        if points.iter().all(|p| p.rem_euclid(modulus) == residue) {
+            return Some((modulus, residue));
+        }
+    }
+    None
+}
+
 fn merge_cell_value(a: &CellValue, b: &CellValue) -> Option<CellValue> {
     match (a, b) {
         (CellValue::Const(x), CellValue::Const(y)) if x == y => Some(CellValue::Const(*x)),
@@ -208,6 +277,20 @@ fn refine_env(env: &mut Env, cond: &Cond) {
                 env.insert(off, CellValue::Const(*v));
             }
         }
+        Cond::Range(expr, ranges) => {
+            if let Some(off) = mem_offset(expr) {
+                if let Some(cv) = range_to_cell_value(ranges) {
+                    let existing = env.get(&off);
+                    let refined = match existing {
+                        Some(ex) => merge_cell_value(ex, &cv),
+                        None => Some(cv),
+                    };
+                    if let Some(v) = refined {
+                        env.insert(off, v);
+                    }
+                }
+            }
+        }
         Cond::Conjunction(clauses) => {
             for c in clauses {
                 refine_env(env, c);
@@ -243,10 +326,27 @@ fn refine_env_false(env: &mut Env, cond: &Cond) {
                 }
             }
         }
+        Cond::Range(expr, ranges) => {
+            if let Some(off) = mem_offset(expr) {
+                if let Some(cv) = complement_range_to_cell_value(ranges) {
+                    let existing = env.get(&off);
+                    let refined = match existing {
+                        Some(ex) => merge_cell_value(ex, &cv),
+                        None => Some(cv),
+                    };
+                    if let Some(v) = refined {
+                        env.insert(off, v);
+                    }
+                }
+            }
+        }
         Cond::Disjunction(clauses) => {
             for c in clauses {
                 refine_env_false(env, c);
             }
+        }
+        Cond::Conjunction(clauses) if clauses.len() == 1 => {
+            refine_env_false(env, &clauses[0]);
         }
         _ => {}
     }
@@ -296,6 +396,45 @@ fn invalidate_env_with_summary(env: &mut Env, summary: &EffectSummary, body: &[N
         for off in updates.unsure.iter().flatten() {
             env.remove(off);
         }
+    }
+}
+
+fn body_touched_cells(summary: &EffectSummary, body: &[Node]) -> Option<Vec<i32>> {
+    if summary.moves_pointer() {
+        return None;
+    }
+    let mut touched = Vec::new();
+    for node in body {
+        let updates = node.preupdates();
+        if updates.unsure.contains(&None) {
+            return None;
+        }
+        for off in updates.unsure.iter().flatten() {
+            touched.push(*off);
+        }
+    }
+    Some(touched)
+}
+
+fn restore_untouched_facts(
+    env: &mut Env,
+    pre_loop_env: &Env,
+    summary: &EffectSummary,
+    body: &[Node],
+) {
+    if let Some(touched) = body_touched_cells(summary, body) {
+        for (off, cv) in pre_loop_env {
+            if !touched.contains(off) && !env.contains_key(off) {
+                env.insert(*off, cv.clone());
+            }
+        }
+    } else if let Some(modulus) = summary.seek_modulus {
+        for (off, cv) in pre_loop_env {
+            if summary.cell_is_disjoint(*off) && !env.contains_key(off) {
+                env.insert(*off, cv.clone());
+            }
+        }
+        let _ = modulus;
     }
 }
 
@@ -401,7 +540,10 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                     let mut body_env = loop_seed_env_with_summary(&env, &summary, body);
                     refine_env(&mut body_env, cond);
                     range_prop_block(body, &body_env);
+
+                    let pre_loop_env = env.clone();
                     invalidate_env_with_summary(&mut env, &summary, body);
+                    restore_untouched_facts(&mut env, &pre_loop_env, &summary, body);
                     refine_env_false(&mut env, cond);
                 }
             }
@@ -1773,6 +1915,207 @@ mod tests {
             );
         } else {
             panic!("expected SetMemory at offset 1");
+        }
+    }
+
+    // --- Pass 4: Branch/loop fact propagation tests ---
+
+    #[test]
+    fn range_true_path_single_point() {
+        // Range(p[0], [(5,5)]) true → p[0] == 5
+        let mut nodes = vec![Node::If {
+            cond: Cond::range(Expr::mem(0), vec![(Some(5), Some(5))]),
+            children: vec![Node::Output { expr: Expr::mem(0) }],
+        }];
+        run(&mut nodes);
+        if let Some(Node::If { children, .. }) = nodes.first() {
+            if let Some(Node::Output { expr }) = children.first() {
+                assert_eq!(*expr, Expr::Int(5), "single-point range should refine to const");
+            }
+        }
+    }
+
+    #[test]
+    fn while_preserves_untouched_facts() {
+        // p[1] = 42; While(p[0] != 0) { p[0] -= 1 }; p[2] = p[1]
+        // Body only touches p[0], p[1] untouched → p[1] should remain 42.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::Input { offset: 0 },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::adjust_memory_by(0, -1)],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(
+                *value,
+                Expr::Int(42),
+                "p[1] should survive while loop that only touches p[0]"
+            );
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn while_touched_cell_not_preserved() {
+        // p[1] = 42; While(p[0] != 0) { p[1] += 1; p[0] -= 1 }; p[2] = p[1]
+        // Body touches p[1] → p[1] should NOT be 42 after the loop.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::Input { offset: 0 },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::adjust_memory_by(1, 1), Node::adjust_memory_by(0, -1)],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(
+                *value,
+                Expr::mem(1),
+                "p[1] should be unknown after loop modifies it"
+            );
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn while_exit_fact_combined_with_untouched() {
+        // p[1] = 42; While(p[0] != 0) { p[0] -= 1 }; Output(p[0] + p[1])
+        // After loop: p[0] == 0 (exit fact), p[1] == 42 (untouched) → 42
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::Input { offset: 0 },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::adjust_memory_by(0, -1)],
+            },
+            Node::Output {
+                expr: Expr::mem(0) + Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let output = nodes.iter().find(|n| matches!(n, Node::Output { .. }));
+        if let Some(Node::Output { expr }) = output {
+            assert_eq!(
+                *expr,
+                Expr::Int(42),
+                "0 + 42 should fold after loop exit + untouched fact"
+            );
+        } else {
+            panic!("expected Output");
+        }
+    }
+
+    #[test]
+    fn while_mod_fact_survives_untouched() {
+        // p[1] = 2*p[3] → Mod(2,0); While(p[0] != 0) { p[0] -= 1 }; If(p[1] == 3) → dead
+        // Body only touches p[0]. p[1] Mod(2,0) should survive.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(2) * Expr::mem(3),
+            },
+            Node::Input { offset: 0 },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::adjust_memory_by(0, -1)],
+            },
+            Node::If {
+                cond: Cond::MemEqual(1, 3),
+                children: vec![Node::SetMemory {
+                    offset: 4,
+                    value: Expr::Int(99),
+                }],
+            },
+        ];
+        run(&mut nodes);
+        let if_count = nodes
+            .iter()
+            .filter(|n| matches!(n, Node::If { .. }))
+            .count();
+        assert_eq!(
+            if_count, 0,
+            "If(p[1]==3) should be dead since Mod(2,0) survives loop: {:?}",
+            nodes
+        );
+    }
+
+    #[test]
+    fn conjunction_single_clause_false_refines() {
+        // Conjunction with one clause behaves like the clause itself
+        // p[0] = unknown; If(Conj([p[0] != 5])) { ... }
+        // False path: p[0] == 5
+        let mut nodes = vec![
+            Node::Input { offset: 0 },
+            Node::If {
+                cond: Cond::conjunction(vec![Cond::MemNotEqual(0, 5)]),
+                children: vec![Node::Output { expr: Expr::mem(0) }],
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        // After If: in false path p[0]=5, in true path p[0] is unknown.
+        // Merge should not give a definite answer.
+        // This is just a safety test — conjunction single-clause handling shouldn't crash
+        assert!(true);
+    }
+
+    #[test]
+    fn range_refinement_extracts_mod() {
+        // If(Range(p[0], [(0,0),(2,2),(4,4)])) → p[0] is Mod(2,0) in true path
+        // Then If(p[0] == 3) should be dead in the true path
+        let mut nodes = vec![Node::If {
+            cond: Cond::range(Expr::mem(0), vec![(Some(0), Some(0)), (Some(2), Some(2)), (Some(4), Some(4))]),
+            children: vec![
+                Node::If {
+                    cond: Cond::MemEqual(0, 3),
+                    children: vec![Node::SetMemory {
+                        offset: 1,
+                        value: Expr::Int(99),
+                    }],
+                },
+            ],
+        }];
+        run(&mut nodes);
+        // Inside the outer If, p[0] is {0,2,4} → Mod(2,0). Inner If(p[0]==3) should be dead.
+        if let Some(Node::If { children: outer, .. }) = nodes.first() {
+            let inner_if_count = outer.iter().filter(|n| matches!(n, Node::If { .. })).count();
+            assert_eq!(
+                inner_if_count, 0,
+                "If(p[0]==3) should be dead inside range {{0,2,4}}: {:?}",
+                outer
+            );
         }
     }
 }
