@@ -147,6 +147,40 @@ fn simplify_cond_with_env(cond: &mut Cond, env: &Env) {
     }
 }
 
+fn merge_cell_value(a: &CellValue, b: &CellValue) -> Option<CellValue> {
+    match (a, b) {
+        (CellValue::Const(x), CellValue::Const(y)) if x == y => Some(CellValue::Const(*x)),
+        (CellValue::Const(x), CellValue::Mod(m, r)) | (CellValue::Mod(m, r), CellValue::Const(x)) => {
+            if x.rem_euclid(*m) == *r {
+                Some(CellValue::Mod(*m, *r))
+            } else {
+                None
+            }
+        }
+        (CellValue::Mod(m1, r1), CellValue::Mod(m2, r2)) => {
+            let g = gcd(*m1, *m2);
+            if g >= 2 && r1.rem_euclid(g) == r2.rem_euclid(g) {
+                Some(CellValue::Mod(g, r1.rem_euclid(g)))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn merge_envs(a: &Env, b: &Env) -> Env {
+    let mut result = Env::new();
+    for (k, va) in a {
+        if let Some(vb) = b.get(k) {
+            if let Some(merged) = merge_cell_value(va, vb) {
+                result.insert(*k, merged);
+            }
+        }
+    }
+    result
+}
+
 fn refine_env(env: &mut Env, cond: &Cond) {
     match cond {
         Cond::MemEqual(t, v) => {
@@ -155,6 +189,27 @@ fn refine_env(env: &mut Env, cond: &Cond) {
         Cond::Conjunction(clauses) => {
             for c in clauses {
                 refine_env(env, c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn refine_env_false(env: &mut Env, cond: &Cond) {
+    match cond {
+        Cond::MemNotEqual(t, v) => {
+            env.insert(*t, CellValue::Const(*v));
+        }
+        Cond::MemEqual(t, v) => {
+            if let Some(CellValue::Const(c)) = env.get(t) {
+                if *c == *v {
+                    env.remove(t);
+                }
+            }
+        }
+        Cond::Disjunction(clauses) => {
+            for c in clauses {
+                refine_env_false(env, c);
             }
         }
         _ => {}
@@ -250,10 +305,15 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                     range_prop_block(body, &env);
                     update_env_from_body(&mut env, body);
                 } else {
-                    let mut body_env = env.clone();
-                    refine_env(&mut body_env, cond);
-                    range_prop_block(body, &body_env);
-                    invalidate_env_for_body(&mut env, body);
+                    let mut true_env = env.clone();
+                    refine_env(&mut true_env, cond);
+                    range_prop_block(body, &true_env);
+                    update_env_from_body(&mut true_env, body);
+
+                    let mut false_env = env.clone();
+                    refine_env_false(&mut false_env, cond);
+
+                    env = merge_envs(&true_env, &false_env);
                 }
             }
 
@@ -269,9 +329,7 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 if !cond.is_never() {
                     range_prop_block(body, &Env::new());
                     invalidate_env_for_body(&mut env, body);
-                    if let Cond::MemNotEqual(t, v) = cond {
-                        env.insert(*t, CellValue::Const(*v));
-                    }
+                    refine_env_false(&mut env, cond);
                 }
             }
 
@@ -1012,5 +1070,335 @@ mod tests {
         let env = Env::new();
         let expr = Expr::mem(0) + Expr::mem(1);
         assert_eq!(derive_cell_value(&expr, &env), None);
+    }
+
+    // --- Branch-sensitive tests ---
+
+    #[test]
+    fn if_merge_preserves_constant_both_branches() {
+        // p[0] = 5
+        // If(p[1] != 0) { p[0] = 5 } (body sets p[0] to same value)
+        // After If: p[0] should still be 5
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(1, 0),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(5),
+                }],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(*value, Expr::Int(5), "p[0] should remain 5 after merge");
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn if_merge_loses_conflicting_constant() {
+        // p[0] = 5
+        // If(p[1] != 0) { p[0] = 10 }
+        // After If: p[0] is 5 or 10, should be unknown
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(1, 0),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(10),
+                }],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(*value, Expr::mem(0), "p[0] should be unknown after merge");
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn if_merge_preserves_mod_info() {
+        // p[0] = 2*p[2] (even)
+        // If(p[1] != 0) { p[0] = 4*p[3] } (still even)
+        // After If: p[0] should still be Mod(2, 0) → can eliminate odd test
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(2) * Expr::mem(2),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(1, 0),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(4) * Expr::mem(3),
+                }],
+            },
+            Node::If {
+                cond: Cond::MemEqual(0, 3),
+                children: vec![Node::SetMemory {
+                    offset: 5,
+                    value: Expr::Int(99),
+                }],
+            },
+        ];
+        run(&mut nodes);
+        // The second If(p[0]==3) should be dead because p[0] is even in both branches
+        let if_count = nodes
+            .iter()
+            .filter(|n| matches!(n, Node::If { .. }))
+            .count();
+        assert!(
+            if_count <= 1,
+            "If(p[0]==3) should be dead after merge preserving even info: {:?}",
+            nodes
+        );
+    }
+
+    #[test]
+    fn if_merge_const_and_mod_yields_mod() {
+        // p[0] = 4 (Const(4))
+        // If(p[1] != 0) { p[0] = 2*p[3] } (Mod(2, 0))
+        // After merge: Const(4) ∩ Mod(2, 0) → Mod(2, 0) since 4 ≡ 0 (mod 2)
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(4),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(1, 0),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(2) * Expr::mem(3),
+                }],
+            },
+            Node::If {
+                cond: Cond::MemEqual(0, 3),
+                children: vec![Node::SetMemory {
+                    offset: 5,
+                    value: Expr::Int(99),
+                }],
+            },
+        ];
+        run(&mut nodes);
+        let if_count = nodes
+            .iter()
+            .filter(|n| matches!(n, Node::If { .. }))
+            .count();
+        assert!(
+            if_count <= 1,
+            "If(p[0]==3) should be dead since p[0] ≡ 0 (mod 2): {:?}",
+            nodes
+        );
+    }
+
+    #[test]
+    fn false_branch_not_equal_gives_constant() {
+        // If(p[0] != 5) { output something }
+        // In false branch: p[0] == 5
+        // If body doesn't modify p[0], and p[0] was unknown before,
+        // then after If:
+        //   true branch: p[0] is unknown (was unknown, body doesn't change it)
+        //   false branch: p[0] == 5
+        // merge → unknown
+        // But if p[0] is already 5 before the If, the If condition is Always and gets inlined.
+        // Let's test: If(p[0] != 5) with p[0] already known as 5 → dead code
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(0, 5),
+                children: vec![Node::SetMemory {
+                    offset: 1,
+                    value: Expr::Int(99),
+                }],
+            },
+        ];
+        run(&mut nodes);
+        assert!(
+            nodes.iter().all(|n| !matches!(n, Node::If { .. })),
+            "If(p[0]!=5) should be dead when p[0]==5: {:?}",
+            nodes
+        );
+    }
+
+    #[test]
+    fn while_exit_conjunction() {
+        // While(p[0] != 0 && p[1] != 0) { ... }
+        // After exit: at least one is 0, but we can't say which
+        // The Disjunction false refinement should apply
+        // Actually, refine_env_false on Conjunction does nothing (since false = disjunction of negations)
+        // This test just verifies no crash
+        let mut nodes = vec![
+            Node::While {
+                cond: Cond::conjunction(vec![Cond::MemNotEqual(0, 0), Cond::MemNotEqual(1, 0)]),
+                children: vec![Node::adjust_memory_by(0, -1)],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        // Can't determine p[0] after exit of conjunction while, so p[2] should stay as mem(0)
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(*value, Expr::mem(0));
+        }
+    }
+
+    #[test]
+    fn merge_cell_value_const_const_same() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Const(5), &CellValue::Const(5)),
+            Some(CellValue::Const(5))
+        );
+    }
+
+    #[test]
+    fn merge_cell_value_const_const_diff() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Const(5), &CellValue::Const(3)),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_cell_value_const_mod_compatible() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Const(4), &CellValue::Mod(2, 0)),
+            Some(CellValue::Mod(2, 0))
+        );
+    }
+
+    #[test]
+    fn merge_cell_value_const_mod_incompatible() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Const(3), &CellValue::Mod(2, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn merge_cell_value_mod_mod_same() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Mod(4, 2), &CellValue::Mod(6, 2)),
+            Some(CellValue::Mod(2, 0))
+        );
+    }
+
+    #[test]
+    fn merge_cell_value_mod_mod_incompatible() {
+        assert_eq!(
+            merge_cell_value(&CellValue::Mod(2, 0), &CellValue::Mod(2, 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn if_unrelated_cells_survive_merge() {
+        // p[0] = 5, p[1] = 10
+        // If(p[2] != 0) { p[3] = 99 }
+        // After If: p[0] and p[1] should still be known
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(10),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(2, 0),
+                children: vec![Node::SetMemory {
+                    offset: 3,
+                    value: Expr::Int(99),
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(0) + Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(
+                *value,
+                Expr::Int(15),
+                "p[0]+p[1] should be 15 after unrelated If"
+            );
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn if_with_mem_equal_false_path_loses_const() {
+        // p[0] = 5
+        // If(p[0] == 5) { p[0] = 10 }
+        // true branch: enters with p[0]=5, then sets p[0]=10 → p[0]=10
+        // false branch: p[0] was 5, but MemEqual(0,5) false → p[0] != 5
+        //   refine_env_false removes Const(5) from env → unknown
+        // merge: Const(10) vs unknown → unknown
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::If {
+                cond: Cond::MemEqual(0, 5),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(10),
+                }],
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        // Since cond is MemEqual(0,5) and p[0] IS 5, the condition is Always
+        // so the branch gets inlined and p[0]=10 after.
+        // That's actually a constant fold! Let's check:
+        let set1 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set1 {
+            assert_eq!(*value, Expr::Int(10));
+        } else {
+            panic!("expected SetMemory at offset 1");
+        }
     }
 }

@@ -156,4 +156,34 @@ mod tests {
         let result = compiler.compile(BufReader::new("[".as_bytes()), &mut out, "brainfuck");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn branch_merge_preserves_constant() {
+        // p[0] = 'A' (65)
+        // If(p[1]) { set p[1]=0 } — doesn't touch p[0]
+        // Output p[0] — should still be 'A'
+        // >++++++++[<++++++++>-]<+  sets p[0]=65
+        // >,[[-]<.>]<.              input p[1]; if nonzero, clear p[1] and output p[0]; output p[0]
+        // The final output of p[0] should be PUTC(65) since p[0] is 65 in both branches
+        let src = ">++++++++[<++++++++>-]<+ >,[ [-] < . > ] < .";
+        let output = compile_bf(src);
+        assert!(
+            output.contains("PUTC(65)") || output.contains("PUTS(\"A"),
+            "p[0] should be constant-folded to 65 after branch merge: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn post_while_zero_propagates() {
+        // After [-], cell is 0. Output it → should be constant
+        // ,[-].
+        let src = ",[-].";
+        let output = compile_bf(src);
+        assert!(
+            output.contains("PUTC(0)") || output.contains("PUTS(\"\\0\")"),
+            "after [-], cell should be known 0: {}",
+            output
+        );
+    }
 }
