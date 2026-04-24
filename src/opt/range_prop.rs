@@ -110,40 +110,54 @@ fn derive_cell_value(expr: &Expr, env: &Env) -> Option<CellValue> {
 }
 
 fn simplify_cond_with_env(cond: &mut Cond, env: &Env) {
-    match cond {
-        Cond::MemEqual(t, v) => {
-            if let Some(CellValue::Mod(m, r)) = env.get(t) {
-                if v.rem_euclid(*m) != *r {
-                    *cond = Cond::Never;
-                }
-            }
-        }
-        Cond::MemNotEqual(t, v) => {
-            if let Some(CellValue::Mod(m, r)) = env.get(t) {
-                if v.rem_euclid(*m) != *r {
-                    *cond = Cond::Always;
-                }
-            }
-        }
-        Cond::Equal(expr, v) => {
-            if let Some(off) = mem_offset(expr) {
-                if let Some(CellValue::Mod(m, r)) = env.get(&off) {
-                    if v.rem_euclid(*m) != *r {
-                        *cond = Cond::Never;
-                    }
-                }
-            }
-        }
+    let replacement = match cond {
+        Cond::MemEqual(t, v) => simplify_known_equal(env.get(t), *v),
+        Cond::MemNotEqual(t, v) => simplify_known_not_equal(env.get(t), *v),
+        Cond::Equal(expr, v) => simplify_known_equal(derive_cell_value(expr, env).as_ref(), *v),
         Cond::NotEqual(expr, v) => {
-            if let Some(off) = mem_offset(expr) {
-                if let Some(CellValue::Mod(m, r)) = env.get(&off) {
-                    if v.rem_euclid(*m) != *r {
-                        *cond = Cond::Always;
-                    }
-                }
-            }
+            simplify_known_not_equal(derive_cell_value(expr, env).as_ref(), *v)
         }
-        _ => {}
+        Cond::Conjunction(clauses) => {
+            for clause in clauses.iter_mut() {
+                simplify_cond_with_env(clause, env);
+            }
+            Some(Cond::conjunction(clauses.clone()))
+        }
+        Cond::Disjunction(clauses) => {
+            for clause in clauses.iter_mut() {
+                simplify_cond_with_env(clause, env);
+            }
+            Some(Cond::disjunction(clauses.clone()))
+        }
+        _ => None,
+    };
+
+    if let Some(new_cond) = replacement {
+        *cond = new_cond;
+    }
+}
+
+fn simplify_known_equal(known: Option<&CellValue>, value: i32) -> Option<Cond> {
+    match known {
+        Some(CellValue::Const(c)) => Some(if *c == value {
+            Cond::Always
+        } else {
+            Cond::Never
+        }),
+        Some(CellValue::Mod(m, r)) if value.rem_euclid(*m) != *r => Some(Cond::Never),
+        _ => None,
+    }
+}
+
+fn simplify_known_not_equal(known: Option<&CellValue>, value: i32) -> Option<Cond> {
+    match known {
+        Some(CellValue::Const(c)) => Some(if *c != value {
+            Cond::Always
+        } else {
+            Cond::Never
+        }),
+        Some(CellValue::Mod(m, r)) if value.rem_euclid(*m) != *r => Some(Cond::Always),
+        _ => None,
     }
 }
 
@@ -187,6 +201,11 @@ fn refine_env(env: &mut Env, cond: &Cond) {
         Cond::MemEqual(t, v) => {
             env.insert(*t, CellValue::Const(*v));
         }
+        Cond::Equal(expr, v) => {
+            if let Some(off) = mem_offset(expr) {
+                env.insert(off, CellValue::Const(*v));
+            }
+        }
         Cond::Conjunction(clauses) => {
             for c in clauses {
                 refine_env(env, c);
@@ -201,10 +220,24 @@ fn refine_env_false(env: &mut Env, cond: &Cond) {
         Cond::MemNotEqual(t, v) => {
             env.insert(*t, CellValue::Const(*v));
         }
+        Cond::NotEqual(expr, v) => {
+            if let Some(off) = mem_offset(expr) {
+                env.insert(off, CellValue::Const(*v));
+            }
+        }
         Cond::MemEqual(t, v) => {
             if let Some(CellValue::Const(c)) = env.get(t) {
                 if *c == *v {
                     env.remove(t);
+                }
+            }
+        }
+        Cond::Equal(expr, v) => {
+            if let Some(off) = mem_offset(expr) {
+                if let Some(CellValue::Const(c)) = env.get(&off) {
+                    if *c == *v {
+                        env.remove(&off);
+                    }
                 }
             }
         }
@@ -215,6 +248,21 @@ fn refine_env_false(env: &mut Env, cond: &Cond) {
         }
         _ => {}
     }
+}
+
+fn loop_seed_env(env: &Env, body: &[Node]) -> Env {
+    let mut seed = env.clone();
+    for node in body {
+        let updates = node.preupdates();
+        if updates.unsure.contains(&None) {
+            seed.clear();
+            return seed;
+        }
+        for off in updates.unsure.iter().flatten() {
+            seed.remove(off);
+        }
+    }
+    seed
 }
 
 fn invalidate_env_for_body(env: &mut Env, body: &[Node]) {
@@ -323,14 +371,14 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
             } => {
                 let substs = env_to_substs(&env);
                 if !substs.is_empty() {
-                    let eval = cond.with_memory(&substs);
-                    if eval.is_never() {
-                        *cond = Cond::Never;
-                    }
+                    *cond = cond.with_memory(&substs);
                 }
+                simplify_cond_with_env(cond, &env);
 
                 if !cond.is_never() {
-                    range_prop_block(body, &Env::new());
+                    let mut body_env = loop_seed_env(&env, body);
+                    refine_env(&mut body_env, cond);
+                    range_prop_block(body, &body_env);
                     invalidate_env_for_body(&mut env, body);
                     refine_env_false(&mut env, cond);
                 }
@@ -344,7 +392,8 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 if !substs.is_empty() {
                     *count = count.with_memory(&substs);
                 }
-                range_prop_block(body, &Env::new());
+                let body_env = loop_seed_env(&env, body);
+                range_prop_block(body, &body_env);
                 invalidate_env_for_body(&mut env, body);
             }
 
@@ -1270,6 +1319,96 @@ mod tests {
         if let Some(Node::SetMemory { value, .. }) = set2 {
             assert_eq!(*value, Expr::mem(0));
         }
+    }
+
+    #[test]
+    fn if_equal_with_known_const_becomes_always() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(7),
+            },
+            Node::If {
+                cond: Cond::equal(Expr::mem(0), 7),
+                children: vec![Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(0),
+                }],
+            },
+        ];
+        run(&mut nodes);
+        assert!(nodes.iter().all(|n| !matches!(n, Node::If { .. })));
+        assert!(nodes
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 1, value } if *value == Expr::Int(7))));
+    }
+
+    #[test]
+    fn while_body_sees_loop_invariant_constants() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::Int(9),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![
+                    Node::SetMemory {
+                        offset: 1,
+                        value: Expr::mem(2),
+                    },
+                    Node::SetMemory {
+                        offset: 0,
+                        value: Expr::mem(0) - Expr::Int(1),
+                    },
+                ],
+            },
+        ];
+        run(&mut nodes);
+        let while_body = nodes.iter().find_map(|n| match n {
+            Node::While { children, .. } => Some(children),
+            _ => None,
+        });
+        let body = while_body.expect("expected while body");
+        assert!(body
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 1, value } if *value == Expr::Int(9))));
+    }
+
+    #[test]
+    fn while_body_does_not_treat_modified_cells_as_invariant() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::Int(9),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![
+                    Node::SetMemory {
+                        offset: 2,
+                        value: Expr::mem(2) + Expr::Int(1),
+                    },
+                    Node::SetMemory {
+                        offset: 1,
+                        value: Expr::mem(2),
+                    },
+                    Node::SetMemory {
+                        offset: 0,
+                        value: Expr::mem(0) - Expr::Int(1),
+                    },
+                ],
+            },
+        ];
+        run(&mut nodes);
+        let while_body = nodes.iter().find_map(|n| match n {
+            Node::While { children, .. } => Some(children),
+            _ => None,
+        });
+        let body = while_body.expect("expected while body");
+        assert!(body
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 1, value } if *value == Expr::mem(2))));
     }
 
     #[test]
