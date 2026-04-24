@@ -2,6 +2,7 @@ pub mod affine_loop;
 pub mod alias_oracle;
 pub mod cleanup;
 pub mod copy_prop;
+pub mod effect_summary;
 pub mod finite_sim;
 pub mod flatten;
 pub mod initial_memory;

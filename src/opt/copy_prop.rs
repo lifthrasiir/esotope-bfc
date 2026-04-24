@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::expr::*;
 use crate::nodes::*;
-use crate::opt::alias_oracle;
 use crate::opt::cleanup;
+use crate::opt::effect_summary::EffectSummary;
 
 #[derive(Clone)]
 struct CopyState {
@@ -69,32 +69,36 @@ impl CopyState {
     }
 
     fn invalidate_body_updates(&mut self, body: &[Node]) {
-        if stride(body) != Some(0) {
-            if let Some(modulus) = alias_oracle::body_modulus(body) {
-                self.invalidate_non_disjoint(modulus);
+        let summary = EffectSummary::of_body(body);
+        self.invalidate_from_summary(&summary);
+    }
+
+    fn invalidate_from_summary(&mut self, summary: &EffectSummary) {
+        if summary.moves_pointer() {
+            if summary.seek_modulus.is_some() {
+                self.invalidate_non_disjoint(summary);
             } else {
                 self.clear();
             }
             return;
         }
 
-        for node in body {
-            let updates = node.preupdates();
-            if updates.unsure.contains(&None) {
-                self.clear();
-                return;
-            }
-            for off in updates.unsure.iter().flatten() {
-                self.invalidate_cell(*off);
+        for update in &summary.prewrites.unsure {
+            match update {
+                Some(off) => self.invalidate_cell(*off),
+                None => {
+                    self.clear();
+                    return;
+                }
             }
         }
     }
 
-    fn invalidate_non_disjoint(&mut self, modulus: i32) {
+    fn invalidate_non_disjoint(&mut self, summary: &EffectSummary) {
         let affected_offsets: Vec<i32> = self
             .values
             .keys()
-            .filter(|&&off| !alias_oracle::cell_disjoint_from_seek(off, modulus))
+            .filter(|&&off| !summary.cell_is_disjoint(off))
             .copied()
             .collect();
         for off in affected_offsets {
@@ -106,7 +110,7 @@ impl CopyState {
             .filter(|expr| {
                 expr.references()
                     .iter()
-                    .any(|r| r.to_int().map_or(true, |o| !alias_oracle::cell_disjoint_from_seek(o, modulus)))
+                    .any(|r| r.to_int().map_or(true, |o| !summary.cell_is_disjoint(o)))
             })
             .cloned()
             .collect();
@@ -114,9 +118,9 @@ impl CopyState {
             self.leaders.remove(&expr);
         }
         self.values.retain(|_, v| {
-            !v.references().iter().any(|r| {
-                r.to_int().map_or(true, |o| !alias_oracle::cell_disjoint_from_seek(o, modulus))
-            })
+            !v.references()
+                .iter()
+                .any(|r| r.to_int().map_or(true, |o| !summary.cell_is_disjoint(o)))
         });
     }
 }

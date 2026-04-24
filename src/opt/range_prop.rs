@@ -6,6 +6,7 @@ use crate::math::gcd;
 use crate::nodes::*;
 use crate::opt::alias_oracle;
 use crate::opt::cleanup;
+use crate::opt::effect_summary::EffectSummary;
 
 #[derive(Clone, Debug, PartialEq)]
 enum CellValue {
@@ -251,12 +252,12 @@ fn refine_env_false(env: &mut Env, cond: &Cond) {
     }
 }
 
-fn loop_seed_env(env: &Env, body: &[Node]) -> Env {
+fn loop_seed_env_with_summary(env: &Env, summary: &EffectSummary, body: &[Node]) -> Env {
     let mut seed = env.clone();
 
-    if stride(body) != Some(0) {
-        if let Some(m) = alias_oracle::body_modulus(body) {
-            seed.retain(|&off, _| alias_oracle::cell_disjoint_from_seek(off, m));
+    if summary.moves_pointer() {
+        if summary.seek_modulus.is_some() {
+            seed.retain(|&off, _| summary.cell_is_disjoint(off));
         } else {
             seed.clear();
         }
@@ -276,10 +277,10 @@ fn loop_seed_env(env: &Env, body: &[Node]) -> Env {
     seed
 }
 
-fn invalidate_env_for_body(env: &mut Env, body: &[Node]) {
-    if stride(body) != Some(0) {
-        if let Some(m) = alias_oracle::body_modulus(body) {
-            env.retain(|&off, _| alias_oracle::cell_disjoint_from_seek(off, m));
+fn invalidate_env_with_summary(env: &mut Env, summary: &EffectSummary, body: &[Node]) {
+    if summary.moves_pointer() {
+        if summary.seek_modulus.is_some() {
+            env.retain(|&off, _| summary.cell_is_disjoint(off));
         } else {
             env.clear();
         }
@@ -396,10 +397,11 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 simplify_cond_with_env(cond, &env);
 
                 if !cond.is_never() {
-                    let mut body_env = loop_seed_env(&env, body);
+                    let summary = EffectSummary::of_body(body);
+                    let mut body_env = loop_seed_env_with_summary(&env, &summary, body);
                     refine_env(&mut body_env, cond);
                     range_prop_block(body, &body_env);
-                    invalidate_env_for_body(&mut env, body);
+                    invalidate_env_with_summary(&mut env, &summary, body);
                     refine_env_false(&mut env, cond);
                 }
             }
@@ -412,9 +414,10 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 if !substs.is_empty() {
                     *count = count.with_memory(&substs);
                 }
-                let body_env = loop_seed_env(&env, body);
+                let summary = EffectSummary::of_body(body);
+                let body_env = loop_seed_env_with_summary(&env, &summary, body);
                 range_prop_block(body, &body_env);
-                invalidate_env_for_body(&mut env, body);
+                invalidate_env_with_summary(&mut env, &summary, body);
             }
 
             Node::SeekMemory {
