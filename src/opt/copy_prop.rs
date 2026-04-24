@@ -67,29 +67,20 @@ impl CopyState {
             .retain(|_, v| !v.references().contains(&cell_ref));
     }
 
-    fn update_from_body(&mut self, body: &[Node]) {
+    fn invalidate_body_updates(&mut self, body: &[Node]) {
+        if stride(body) != Some(0) {
+            self.clear();
+            return;
+        }
+
         for node in body {
-            match node {
-                Node::SetMemory { offset, value } => {
-                    self.invalidate_cell(*offset);
-                    self.values.insert(*offset, value.clone());
-                    if !value.is_simple() && mem_offset(value).is_none() {
-                        self.leaders.entry(value.clone()).or_insert(*offset);
-                    }
-                }
-                Node::Input { offset } => {
-                    self.invalidate_cell(*offset);
-                }
-                _ => {
-                    let updates = node.preupdates();
-                    if updates.unsure.contains(&None) {
-                        self.clear();
-                        return;
-                    }
-                    for off in updates.unsure.iter().flatten() {
-                        self.invalidate_cell(*off);
-                    }
-                }
+            let updates = node.preupdates();
+            if updates.unsure.contains(&None) {
+                self.clear();
+                return;
+            }
+            for off in updates.unsure.iter().flatten() {
+                self.invalidate_cell(*off);
             }
         }
     }
@@ -131,7 +122,7 @@ fn visit(node: &mut Node) {
         for child in children.iter_mut() {
             visit(child);
         }
-        copy_prop_pass(children);
+        let _ = copy_prop_pass_with_state(children, &CopyState::new());
     }
 }
 
@@ -143,8 +134,8 @@ fn mem_offset(expr: &Expr) -> Option<i32> {
     }
 }
 
-fn copy_prop_pass(children: &mut Vec<Node>) {
-    let mut state = CopyState::new();
+fn copy_prop_pass_with_state(children: &mut Vec<Node>, initial_state: &CopyState) -> CopyState {
+    let mut state = initial_state.clone();
 
     for i in 0..children.len() {
         match &children[i] {
@@ -195,24 +186,41 @@ fn copy_prop_pass(children: &mut Vec<Node>) {
                         ..
                     } = &mut node
                     {
-                        copy_prop_pass(body);
-                        state.update_from_body(body);
+                        state = copy_prop_pass_with_state(body, &state);
                     }
                     children[i] = node;
                 } else {
-                    let mut true_state = state.clone();
                     let mut node = std::mem::replace(&mut children[i], Node::Nop);
-                    if let Node::If {
-                        children: ref mut body,
-                        ..
-                    } = &mut node
-                    {
-                        copy_prop_pass(body);
-                        true_state.update_from_body(body);
-                    }
+                    let true_state = if let Node::If { children: body, .. } = &mut node {
+                        copy_prop_pass_with_state(body, &state)
+                    } else {
+                        state.clone()
+                    };
                     children[i] = node;
 
                     state = merge_states(&true_state, &state);
+                }
+            }
+
+            Node::Repeat {
+                count,
+                children: body,
+            } => {
+                let canonical = state.canonicalize(count);
+                children[i] = Node::Repeat {
+                    count: canonical,
+                    children: body.clone(),
+                };
+                if let Node::Repeat { children: body, .. } = &mut children[i] {
+                    let _ = copy_prop_pass_with_state(body, &state);
+                    state.invalidate_body_updates(body);
+                }
+            }
+
+            Node::While { .. } => {
+                if let Node::While { children: body, .. } = &mut children[i] {
+                    let _ = copy_prop_pass_with_state(body, &state);
+                    state.invalidate_body_updates(body);
                 }
             }
 
@@ -223,6 +231,7 @@ fn copy_prop_pass(children: &mut Vec<Node>) {
     }
 
     cleanup::cleanup(children);
+    state
 }
 
 #[cfg(test)]
@@ -231,7 +240,7 @@ mod tests {
     use crate::cond::*;
 
     fn run_copy_prop(nodes: &mut Vec<Node>) {
-        copy_prop_pass(nodes);
+        let _ = copy_prop_pass_with_state(nodes, &CopyState::new());
     }
 
     #[test]
@@ -321,9 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn control_flow_flushes_state() {
+    fn while_unrelated_control_flow_preserves_state() {
         // p[1] = p[0]; while(...) { p[3] = 0 }; p[2] = p[1]
-        // After control flow, state is flushed, so p[2] = p[1] stays
+        // The loop body does not touch p[0] or p[1], so the alias can survive.
         let mut nodes = vec![
             Node::SetMemory {
                 offset: 1,
@@ -344,7 +353,7 @@ mod tests {
         run_copy_prop(&mut nodes);
         let last = nodes.last().unwrap();
         if let Node::SetMemory { offset: 2, value } = last {
-            assert_eq!(*value, Expr::mem(1));
+            assert_eq!(*value, Expr::mem(0));
         } else {
             panic!("expected SetMemory at offset 2, got {:?}", last);
         }
@@ -716,6 +725,137 @@ mod tests {
             assert_eq!(*value, Expr::mem(0), "alias should survive nested If");
         } else {
             panic!("expected SetMemory at offset 5");
+        }
+    }
+
+    #[test]
+    fn if_body_sees_outer_alias() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+            Node::If {
+                cond: Cond::MemNotEqual(2, 0),
+                children: vec![Node::SetMemory {
+                    offset: 3,
+                    value: Expr::mem(1),
+                }],
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        if let Some(Node::If { children, .. }) = nodes.iter().find(|n| matches!(n, Node::If { .. }))
+        {
+            let set3 = children
+                .iter()
+                .find(|n| matches!(n, Node::SetMemory { offset: 3, .. }));
+            if let Some(Node::SetMemory { value, .. }) = set3 {
+                assert_eq!(*value, Expr::mem(0));
+            } else {
+                panic!("expected SetMemory in if body");
+            }
+        } else {
+            panic!("expected If node");
+        }
+    }
+
+    #[test]
+    fn repeat_body_sees_outer_alias_and_post_state_survives() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+            Node::Repeat {
+                count: Expr::mem(2),
+                children: vec![Node::SetMemory {
+                    offset: 3,
+                    value: Expr::mem(1),
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+
+        let repeat = nodes.iter().find_map(|n| match n {
+            Node::Repeat { children, .. } => Some(children),
+            _ => None,
+        });
+        let body = repeat.expect("expected repeat");
+        assert!(body
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 3, value } if *value == Expr::mem(0))));
+
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(*value, Expr::mem(0));
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn while_unrelated_updates_preserve_alias_after_loop() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(2, 0),
+                children: vec![Node::SetMemory {
+                    offset: 3,
+                    value: Expr::Int(5),
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(*value, Expr::mem(0));
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn while_modified_alias_is_invalidated_after_loop() {
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(2, 0),
+                children: vec![Node::SetMemory {
+                    offset: 0,
+                    value: Expr::Int(5),
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(*value, Expr::mem(1));
+        } else {
+            panic!("expected SetMemory at offset 4");
         }
     }
 }
