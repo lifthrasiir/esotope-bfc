@@ -3,6 +3,7 @@ pub mod cleanup;
 pub mod copy_prop;
 pub mod flatten;
 pub mod initial_memory;
+pub mod mem_layout;
 pub mod more_loop;
 pub mod propagate;
 pub mod range_prop;

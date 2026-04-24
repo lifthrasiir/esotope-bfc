@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
 
 use crate::codegen::c::Generator;
@@ -7,6 +8,7 @@ use crate::opt;
 pub struct Compiler {
     cellsize: u32,
     debugging: bool,
+    lower_to_vars: bool,
 }
 
 impl Compiler {
@@ -14,7 +16,12 @@ impl Compiler {
         Compiler {
             cellsize,
             debugging,
+            lower_to_vars: false,
         }
+    }
+
+    pub fn set_lower_to_vars(&mut self, v: bool) {
+        self.lower_to_vars = v;
     }
 
     pub fn optimize(&self, node: &mut Node) {
@@ -33,8 +40,17 @@ impl Compiler {
         opt::stdlib::transform(node);
     }
 
-    pub fn generate<W: Write>(&self, node: &Node, out: &mut W) -> std::io::Result<()> {
-        let gen = Generator::new(self.cellsize, self.debugging);
+    pub fn analyze_memory(&self, node: &Node) -> Option<BTreeSet<i32>> {
+        opt::mem_layout::analyze(node)
+    }
+
+    pub fn generate<W: Write>(
+        &self,
+        node: &Node,
+        out: &mut W,
+        used_cells: Option<&BTreeSet<i32>>,
+    ) -> std::io::Result<()> {
+        let gen = Generator::new(self.cellsize, self.debugging, used_cells, self.lower_to_vars);
         gen.generate(node, out)
     }
 
@@ -49,7 +65,9 @@ impl Compiler {
             _ => crate::parser::brainfuck::parse(reader)?,
         };
         self.optimize(&mut node);
-        self.generate(&node, out).map_err(|e| e.to_string())
+        let used_cells = self.analyze_memory(&node);
+        self.generate(&node, out, used_cells.as_ref())
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -60,6 +78,16 @@ mod tests {
 
     fn compile_bf(src: &str) -> String {
         let compiler = Compiler::new(8, false);
+        let mut out = Vec::new();
+        compiler
+            .compile(BufReader::new(src.as_bytes()), &mut out, "brainfuck")
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn compile_bf_vars(src: &str) -> String {
+        let mut compiler = Compiler::new(8, false);
+        compiler.set_lower_to_vars(true);
         let mut out = Vec::new();
         compiler
             .compile(BufReader::new(src.as_bytes()), &mut out, "brainfuck")
@@ -129,6 +157,63 @@ mod tests {
         let output = compile_bfrle("+*72.");
         // +*72 sets cell to 72 ('H'), then output
         assert!(output.contains("PUTS(\"H\")") || output.contains("PUTC(72)"));
+    }
+
+    #[test]
+    fn memory_sized_to_usage() {
+        let output = compile_bf(",>,[-<+>]<.");
+        assert!(
+            output.contains("m[2]"),
+            "array should be sized to 2: {}",
+            output
+        );
+        assert!(!output.contains("m[30000]"));
+    }
+
+    #[test]
+    fn memory_falls_back_for_dynamic_pointer() {
+        // [>] has dynamic pointer movement
+        let output = compile_bf(",+[>]");
+        assert!(
+            output.contains("m[30000]"),
+            "should fall back to 30000 for dynamic pointer: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn lower_to_vars_basic() {
+        let output = compile_bf_vars(",[.,]");
+        assert!(
+            output.contains("static uint8_t c0 = 0;"),
+            "should declare c0 variable: {}",
+            output
+        );
+        assert!(!output.contains("*p"));
+        assert!(output.contains("c0 = GETC()"));
+        assert!(output.contains("while (c0)"));
+        assert!(output.contains("PUTC(c0)"));
+    }
+
+    #[test]
+    fn lower_to_vars_multi_cell() {
+        let output = compile_bf_vars(",>,[-<+>]<.");
+        assert!(
+            output.contains("c0 = 0, c1 = 0"),
+            "should declare c0, c1: {}",
+            output
+        );
+        assert!(!output.contains("*p"));
+    }
+
+    #[test]
+    fn lower_to_vars_falls_back_for_dynamic() {
+        let output = compile_bf_vars(",+[>]");
+        assert!(
+            output.contains("m[30000]"),
+            "should fall back to array for dynamic pointer: {}",
+            output
+        );
     }
 
     #[test]

@@ -39,6 +39,9 @@ Options:
     Prints more internal progress.
 --debug
     Enables debugging output (as C comment) in the code.
+--lower-to-vars
+    When the program uses a finite set of cells, lower the memory
+    array to individual variables in the generated C code.
 
 For more information please visit http://esotope-bfc.googlecode.com/.
 "#,
@@ -54,6 +57,7 @@ fn main() {
     let mut _outformat = "c".to_string();
     let mut _verbose = false;
     let mut debugging = false;
+    let mut lower_to_vars = false;
     let mut filename: Option<String> = None;
 
     let mut i = 1;
@@ -109,6 +113,9 @@ fn main() {
             "--debug" => {
                 debugging = true;
             }
+            "--lower-to-vars" => {
+                lower_to_vars = true;
+            }
             s if s.starts_with('-') && s.len() > 1 && s != "-" => {
                 eprintln!("Error: Unknown option {}.", s);
                 eprintln!("Type \"{} --help\" for usage.", progname);
@@ -149,7 +156,8 @@ fn main() {
         }
     };
 
-    let compiler = Compiler::new(cellsize, debugging);
+    let mut compiler = Compiler::new(cellsize, debugging);
+    compiler.set_lower_to_vars(lower_to_vars);
     let mut stdout = io::stdout().lock();
 
     match compiler.compile(reader, &mut stdout, &informat) {

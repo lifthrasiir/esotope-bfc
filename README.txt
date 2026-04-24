@@ -24,7 +24,7 @@ following Brainfuck code:
     #include <stdio.h>
     #include <stdint.h>
     #define PUTS(s) fwrite(s, 1, sizeof(s)-1, stdout)
-    static uint8_t m[30000], *p = m;
+    static uint8_t m[1], *p = m;
     int main(void) {
         PUTS("Hello World!");
         return 0;

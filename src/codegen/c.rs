@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::{self, Write as FmtWrite};
 use std::io::{self, Write as IoWrite};
 
@@ -10,18 +10,43 @@ pub struct Generator {
     cellsize: u32,
     #[allow(dead_code)]
     debugging: bool,
+    used_cells: Option<BTreeSet<i32>>,
+    lower_to_vars: bool,
 }
 
 impl Generator {
-    pub fn new(cellsize: u32, debugging: bool) -> Self {
+    pub fn new(
+        cellsize: u32,
+        debugging: bool,
+        used_cells: Option<&BTreeSet<i32>>,
+        lower_to_vars: bool,
+    ) -> Self {
         Generator {
             cellsize,
             debugging,
+            used_cells: used_cells.cloned(),
+            lower_to_vars,
         }
     }
 
     pub fn generate<W: IoWrite>(&self, node: &Node, out: &mut W) -> io::Result<()> {
-        let mut state = GenState::new(self.cellsize);
+        let var_mode = if self.lower_to_vars {
+            self.used_cells.as_ref().map(|cells| {
+                let cell_names: BTreeMap<i32, String> = cells
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &cell)| (cell, format!("c{i}")))
+                    .collect();
+                VarMode {
+                    cell_names,
+                    ptr_offset: 0,
+                }
+            })
+        } else {
+            None
+        };
+
+        let mut state = GenState::new(self.cellsize, &self.used_cells, var_mode);
         let mut body = String::new();
         state.write_node(&mut body, node).unwrap();
 
@@ -42,17 +67,28 @@ impl Generator {
     }
 }
 
-struct GenState {
+struct VarMode {
+    cell_names: BTreeMap<i32, String>,
+    ptr_offset: i32,
+}
+
+struct GenState<'a> {
     cellsize: u32,
     nindents: usize,
     nextvars: HashMap<String, usize>,
     getcused: bool,
     putcused: bool,
     putsused: bool,
+    used_cells: &'a Option<BTreeSet<i32>>,
+    var_mode: Option<VarMode>,
 }
 
-impl GenState {
-    fn new(cellsize: u32) -> Self {
+impl<'a> GenState<'a> {
+    fn new(
+        cellsize: u32,
+        used_cells: &'a Option<BTreeSet<i32>>,
+        var_mode: Option<VarMode>,
+    ) -> Self {
         GenState {
             cellsize,
             nindents: 0,
@@ -60,6 +96,8 @@ impl GenState {
             getcused: false,
             putcused: false,
             putsused: false,
+            used_cells,
+            var_mode,
         }
     }
 
@@ -84,41 +122,89 @@ impl GenState {
         Ok(name)
     }
 
+    fn format_cell(&self, offset: i32) -> String {
+        if let Some(ref vm) = self.var_mode {
+            let abs = vm.ptr_offset + offset;
+            vm.cell_names[&abs].clone()
+        } else {
+            format!("p[{offset}]")
+        }
+    }
+
+    fn format_expr(&self, expr: &Expr) -> String {
+        if let Some(ref vm) = self.var_mode {
+            format_var_expr(expr, 0, vm)
+        } else {
+            CExpr(expr).to_string()
+        }
+    }
+
+    fn format_cond(&self, cond: &Cond) -> String {
+        let adopted = adopt_cond(cond, self.cellsize);
+        if let Some(ref vm) = self.var_mode {
+            format_var_cond(&adopted, vm)
+        } else {
+            CCond(&adopted).to_string()
+        }
+    }
+
+    fn format_set_memory(&self, offset: i32, value: &Expr) -> String {
+        let cell = self.format_cell(offset);
+        let val_str = self.format_expr(value);
+        let delta = value - &Expr::mem(offset);
+
+        let full = format!("{cell} = {val_str};");
+
+        if let Some(ref vm) = self.var_mode {
+            let delta_str = format_var_adjust(&cell, &delta, vm);
+            if delta_str.is_empty() {
+                return String::new();
+            }
+            let short = format!("{delta_str};");
+            if short.len() < full.len() { short } else { full }
+        } else {
+            let short_len = {
+                let mut c = LenCounter(0);
+                write!(c, "{};", PRef(offset, &delta)).unwrap();
+                c.0
+            };
+            if short_len < full.len() {
+                format!("{};", PRef(offset, &delta))
+            } else {
+                full
+            }
+        }
+    }
+
     fn write_node(&mut self, f: &mut dyn FmtWrite, node: &Node) -> fmt::Result {
         match node {
             Node::Nop => {}
             Node::SetMemory { offset, value } => {
-                let delta = value - &Expr::mem(*offset);
-                let full_len = {
-                    let mut c = LenCounter(0);
-                    write!(c, "p[{offset}] = {};", CExpr(value)).unwrap();
-                    c.0
-                };
-                let short_len = {
-                    let mut c = LenCounter(0);
-                    write!(c, "{};", PRef(*offset, &delta)).unwrap();
-                    c.0
-                };
-                if short_len < full_len {
-                    self.writeln(f, format_args!("{};", PRef(*offset, &delta)))?;
-                } else {
-                    self.writeln(f, format_args!("p[{offset}] = {};", CExpr(value)))?;
+                let s = self.format_set_memory(*offset, value);
+                if !s.is_empty() {
+                    self.writeln(f, format_args!("{s}"))?;
                 }
             }
             Node::MovePointer { offset } => {
-                let adj = FormatAdjust("p", &Expr::Int(*offset));
-                let s = adj.to_string();
-                if !s.is_empty() {
-                    self.writeln(f, format_args!("{s};"))?;
+                if let Some(ref mut vm) = self.var_mode {
+                    vm.ptr_offset += offset;
+                } else {
+                    let adj = FormatAdjust("p", &Expr::Int(*offset));
+                    let s = adj.to_string();
+                    if !s.is_empty() {
+                        self.writeln(f, format_args!("{s};"))?;
+                    }
                 }
             }
             Node::Input { offset } => {
                 self.getcused = true;
-                self.writeln(f, format_args!("p[{offset}] = GETC();"))?;
+                let cell = self.format_cell(*offset);
+                self.writeln(f, format_args!("{cell} = GETC();"))?;
             }
             Node::Output { expr } => {
                 self.putcused = true;
-                self.writeln(f, format_args!("PUTC({});", CExpr(expr)))?;
+                let e = self.format_expr(expr);
+                self.writeln(f, format_args!("PUTC({e});"))?;
             }
             Node::OutputConst { s } => {
                 self.putsused = true;
@@ -135,11 +221,66 @@ impl GenState {
                 self.writeln(f, format_args!("while (p[{target}] != {value}) {adj};"))?;
             }
             Node::Program { children } => {
-                self.writeln(
-                    f,
-                    format_args!("static uint{}_t m[30000], *p = m;", self.cellsize),
-                )?;
-                self.writeln(f, format_args!("int main(void) {{"))?;
+                if let Some(ref vm) = self.var_mode {
+                    if vm.cell_names.is_empty() {
+                        self.writeln(f, format_args!("int main(void) {{"))?;
+                    } else {
+                        let decls: Vec<String> = vm
+                            .cell_names
+                            .values()
+                            .map(|name| format!("{name} = 0"))
+                            .collect();
+                        self.writeln(
+                            f,
+                            format_args!(
+                                "static uint{}_t {};",
+                                self.cellsize,
+                                decls.join(", ")
+                            ),
+                        )?;
+                        self.writeln(f, format_args!("int main(void) {{"))?;
+                    }
+                } else if let Some(ref cells) = self.used_cells {
+                    let size = if cells.is_empty() {
+                        1
+                    } else {
+                        let min = *cells.iter().next().unwrap();
+                        let max = *cells.iter().next_back().unwrap();
+                        (max - min + 1) as u32
+                    };
+                    if cells.is_empty() || *cells.iter().next().unwrap() >= 0 {
+                        let arr_size = if cells.is_empty() {
+                            1
+                        } else {
+                            (*cells.iter().next_back().unwrap() + 1) as u32
+                        };
+                        self.writeln(
+                            f,
+                            format_args!(
+                                "static uint{}_t m[{}], *p = m;",
+                                self.cellsize, arr_size
+                            ),
+                        )?;
+                    } else {
+                        let min = *cells.iter().next().unwrap();
+                        self.writeln(
+                            f,
+                            format_args!(
+                                "static uint{}_t m[{}], *p = m + {};",
+                                self.cellsize,
+                                size,
+                                -min
+                            ),
+                        )?;
+                    }
+                    self.writeln(f, format_args!("int main(void) {{"))?;
+                } else {
+                    self.writeln(
+                        f,
+                        format_args!("static uint{}_t m[30000], *p = m;", self.cellsize),
+                    )?;
+                    self.writeln(f, format_args!("int main(void) {{"))?;
+                };
                 self.nindents += 1;
 
                 let mut returns = true;
@@ -155,8 +296,8 @@ impl GenState {
                 self.writeln(f, format_args!("}}"))?;
             }
             Node::If { cond, children } => {
-                let adopted = adopt_cond(cond, self.cellsize);
-                self.writeln(f, format_args!("if ({}) {{", CCond(&adopted)))?;
+                let cond_str = self.format_cond(cond);
+                self.writeln(f, format_args!("if ({cond_str}) {{"))?;
                 self.nindents += 1;
                 for child in children {
                     self.write_node(f, child)?;
@@ -171,12 +312,10 @@ impl GenState {
                     count.clone()
                 };
                 let var = self.newvariable(f, "loopcnt")?;
+                let ce = self.format_expr(&count_expr);
                 self.writeln(
                     f,
-                    format_args!(
-                        "for ({var} = {}; {var} > 0; --{var}) {{",
-                        CExpr(&count_expr),
-                    ),
+                    format_args!("for ({var} = {ce}; {var} > 0; --{var}) {{"),
                 )?;
                 self.nindents += 1;
                 for child in children {
@@ -189,8 +328,8 @@ impl GenState {
                 if cond.is_always() && children.is_empty() {
                     self.writeln(f, format_args!("while (1); /* infinite loop */"))?;
                 } else {
-                    let adopted = adopt_cond(cond, self.cellsize);
-                    self.writeln(f, format_args!("while ({}) {{", CCond(&adopted)))?;
+                    let cond_str = self.format_cond(cond);
+                    self.writeln(f, format_args!("while ({cond_str}) {{"))?;
                     self.nindents += 1;
                     for child in children {
                         self.write_node(f, child)?;
@@ -455,6 +594,196 @@ impl fmt::Display for Addslashes<'_> {
     }
 }
 
+fn format_var_expr(expr: &Expr, prec: u32, vm: &VarMode) -> String {
+    match expr {
+        Expr::Int(v) => format!("{v}"),
+        Expr::Reference(offset) => {
+            let off = offset.to_int().unwrap();
+            let abs = vm.ptr_offset + off;
+            vm.cell_names[&abs].clone()
+        }
+        Expr::Linear(lin) => {
+            if lin.terms.is_empty() && lin.constant == 0 {
+                return "0".to_string();
+            }
+            let nparts = lin.terms.len() + if lin.constant != 0 { 1 } else { 0 };
+            let need_paren = prec > 1 && nparts > 1;
+            let mut s = String::new();
+            if need_paren {
+                s.push('(');
+            }
+            let mut first = true;
+            for (v, k) in &lin.terms {
+                let ks = format_var_expr(k, 1, vm);
+                if first {
+                    first = false;
+                    match v {
+                        -1 => write!(s, "-{ks}").unwrap(),
+                        1 => s.push_str(&ks),
+                        _ => write!(s, "{v}*{ks}").unwrap(),
+                    }
+                } else {
+                    match v {
+                        -1 => write!(s, "-{ks}").unwrap(),
+                        1 => write!(s, "+{ks}").unwrap(),
+                        _ => write!(s, "{v:+}*{ks}").unwrap(),
+                    }
+                }
+            }
+            if lin.constant != 0 {
+                if first {
+                    write!(s, "{}", lin.constant).unwrap();
+                } else {
+                    write!(s, "{:+}", lin.constant).unwrap();
+                }
+            }
+            if need_paren {
+                s.push(')');
+            }
+            s
+        }
+        Expr::Multiply(factors) => {
+            let need_paren = prec > 2 && factors.len() > 1;
+            let mut s = String::new();
+            if need_paren {
+                s.push('(');
+            }
+            for (i, e) in factors.iter().enumerate() {
+                if i > 0 {
+                    s.push('*');
+                }
+                s.push_str(&format_var_expr(e, 2, vm));
+            }
+            if need_paren {
+                s.push(')');
+            }
+            s
+        }
+        Expr::Division(l, r) | Expr::ExactDivision(l, r) => {
+            let mut s = String::new();
+            if prec > 3 {
+                s.push('(');
+            }
+            write!(s, "{}/{}", format_var_expr(l, 2, vm), format_var_expr(r, 2, vm)).unwrap();
+            if prec > 3 {
+                s.push(')');
+            }
+            s
+        }
+        Expr::Modulo(l, r) => {
+            let mut s = String::new();
+            if prec > 3 {
+                s.push('(');
+            }
+            write!(s, "{}%{}", format_var_expr(l, 2, vm), format_var_expr(r, 2, vm)).unwrap();
+            if prec > 3 {
+                s.push(')');
+            }
+            s
+        }
+    }
+}
+
+fn format_var_cond(cond: &Cond, vm: &VarMode) -> String {
+    match cond {
+        Cond::Always => "1".to_string(),
+        Cond::Never => "0".to_string(),
+        Cond::Equal(expr, 0) => format!("!{}", format_var_expr(expr, 0, vm)),
+        Cond::Equal(expr, v) => format!("{} == {v}", format_var_expr(expr, 0, vm)),
+        Cond::NotEqual(expr, 0) => format_var_expr(expr, 0, vm),
+        Cond::NotEqual(expr, v) => format!("{} != {v}", format_var_expr(expr, 0, vm)),
+        Cond::MemEqual(t, 0) => {
+            let abs = vm.ptr_offset + t;
+            format!("!{}", vm.cell_names[&abs])
+        }
+        Cond::MemEqual(t, v) => {
+            let abs = vm.ptr_offset + t;
+            format!("{} == {v}", vm.cell_names[&abs])
+        }
+        Cond::MemNotEqual(t, 0) => {
+            let abs = vm.ptr_offset + t;
+            vm.cell_names[&abs].clone()
+        }
+        Cond::MemNotEqual(t, v) => {
+            let abs = vm.ptr_offset + t;
+            format!("{} != {v}", vm.cell_names[&abs])
+        }
+        Cond::Range(expr, ranges) => {
+            let e = format_var_expr(expr, 0, vm);
+            if ranges.len() == 1 {
+                match ranges[0] {
+                    (None, Some(mx)) => format!("{e} <= {mx}"),
+                    (Some(mn), None) => format!("{mn} <= {e}"),
+                    (Some(mn), Some(mx)) if mn == mx => format!("{e} == {mn}"),
+                    (Some(mn), Some(mx)) => format!("({mn} <= {e} && {e} <= {mx})"),
+                    (None, None) => "1".to_string(),
+                }
+            } else {
+                let mut s = "(".to_string();
+                for (i, &(min, max)) in ranges.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(" || ");
+                    }
+                    match (min, max) {
+                        (None, Some(mx)) => write!(s, "{e} <= {mx}").unwrap(),
+                        (Some(mn), None) => write!(s, "{mn} <= {e}").unwrap(),
+                        (Some(mn), Some(mx)) if mn == mx => write!(s, "{e} == {mn}").unwrap(),
+                        (Some(mn), Some(mx)) => {
+                            write!(s, "({mn} <= {e} && {e} <= {mx})").unwrap()
+                        }
+                        (None, None) => s.push('1'),
+                    }
+                }
+                s.push(')');
+                s
+            }
+        }
+        Cond::Conjunction(clauses) => {
+            let mut s = "(".to_string();
+            for (i, c) in clauses.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(" && ");
+                }
+                s.push_str(&format_var_cond(c, vm));
+            }
+            s.push(')');
+            s
+        }
+        Cond::Disjunction(clauses) => {
+            let mut s = "(".to_string();
+            for (i, c) in clauses.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(" || ");
+                }
+                s.push_str(&format_var_cond(c, vm));
+            }
+            s.push(')');
+            s
+        }
+    }
+}
+
+fn format_var_adjust(refname: &str, value: &Expr, vm: &VarMode) -> String {
+    if let Some(v) = value.to_int() {
+        match v {
+            0 => return String::new(),
+            1 => return format!("++{refname}"),
+            -1 => return format!("--{refname}"),
+            _ => {}
+        }
+    }
+    let neg = -value;
+    let vs = format_var_expr(value, 0, vm);
+    let ns = format_var_expr(&neg, 0, vm);
+    let pos = format!("{refname} += {vs}");
+    let negs = format!("{refname} -= {ns}");
+    if negs.len() < pos.len() {
+        negs
+    } else {
+        pos
+    }
+}
+
 fn adopt_cond(cond: &Cond, cellsize: u32) -> Cond {
     match cond {
         Cond::Range(expr, ranges) => {
@@ -509,7 +838,7 @@ mod tests {
     use super::*;
 
     fn generate_c(node: &Node, cellsize: u32) -> String {
-        let gen = Generator::new(cellsize, false);
+        let gen = Generator::new(cellsize, false, None, false);
         let mut out = Vec::new();
         gen.generate(node, &mut out).unwrap();
         String::from_utf8(out).unwrap()
