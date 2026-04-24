@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cond::*;
 use crate::expr::*;
@@ -16,6 +16,7 @@ fn visit(node: &mut Node, cellsize: u32) {
             visit(child, cellsize);
         }
         affine_loop_pass(children, cellsize);
+        affine_repeat_pass(children);
     }
 }
 
@@ -31,6 +32,44 @@ fn summarize_body(kids: &[Node]) -> Option<BTreeMap<i32, i32>> {
             }
             _ => return None,
         }
+    }
+
+    Some(deltas)
+}
+
+/// Symbolically execute the body and compute per-cell deltas as expressions.
+/// Returns None if:
+/// - any node is not SetMemory
+/// - any delta references a cell that is modified in the body (not loop-invariant)
+fn summarize_body_general(kids: &[Node]) -> Option<BTreeMap<i32, Expr>> {
+    let mut env: BTreeMap<i32, Expr> = BTreeMap::new();
+    let mut modified: BTreeSet<i32> = BTreeSet::new();
+
+    for inode in kids {
+        match inode {
+            Node::SetMemory { offset, value } => {
+                let resolved = value.with_memory(&env);
+                env.insert(*offset, resolved);
+                modified.insert(*offset);
+            }
+            _ => return None,
+        }
+    }
+
+    let mut deltas: BTreeMap<i32, Expr> = BTreeMap::new();
+    for (&offset, value) in &env {
+        let delta = value - &Expr::mem(offset);
+        if let Some(0) = delta.to_int() {
+            continue;
+        }
+        let refs = delta.references();
+        for r in &refs {
+            match r.to_int() {
+                Some(cell) if !modified.contains(&cell) => {}
+                _ => return None,
+            }
+        }
+        deltas.insert(offset, delta);
     }
 
     Some(deltas)
@@ -65,7 +104,153 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
             continue;
         }
 
-        let deltas = match summarize_body(&kids) {
+        // Try constant-delta summary first (fast path)
+        if let Some(deltas) = summarize_body(&kids) {
+            let control_delta = *deltas.get(&target).unwrap_or(&0);
+            if control_delta == 0 {
+                i += 1;
+                continue;
+            }
+
+            let delta = ((value - control_delta) % overflow + overflow) % overflow;
+
+            if delta == 0 {
+                children[i] = Node::While {
+                    cond: Cond::Always,
+                    children: Vec::new(),
+                };
+                i += 1;
+                continue;
+            }
+
+            let (u, _v, gcd) = gcdex(delta, overflow);
+            let diff = Expr::mem(target) - Expr::Int(value);
+            let count = Expr::Int(((u % overflow) + overflow) % overflow)
+                * Expr::div(diff.clone(), Expr::Int(gcd));
+
+            let mut replacement = Vec::new();
+
+            if gcd > 1 {
+                replacement.push(Node::If {
+                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
+                    children: vec![Node::While {
+                        cond: Cond::Always,
+                        children: Vec::new(),
+                    }],
+                });
+            }
+
+            for (&offset, &delta_val) in &deltas {
+                if offset == target || delta_val == 0 {
+                    continue;
+                }
+                replacement.push(Node::SetMemory {
+                    offset,
+                    value: Expr::mem(offset) + Expr::Int(delta_val) * count.clone(),
+                });
+            }
+
+            replacement.push(Node::SetMemory {
+                offset: target,
+                value: Expr::Int(value),
+            });
+
+            children.splice(i..=i, replacement.clone());
+            i += replacement.len();
+            continue;
+        }
+
+        // Try general affine summary (handles non-constant deltas referencing invariant cells)
+        if let Some(deltas) = summarize_body_general(&kids) {
+            let control_delta = match deltas.get(&target) {
+                Some(d) => match d.to_int() {
+                    Some(v) => v,
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                },
+                None => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            if control_delta == 0 {
+                i += 1;
+                continue;
+            }
+
+            let delta = ((value - control_delta) % overflow + overflow) % overflow;
+
+            if delta == 0 {
+                children[i] = Node::While {
+                    cond: Cond::Always,
+                    children: Vec::new(),
+                };
+                i += 1;
+                continue;
+            }
+
+            let (u, _v, gcd) = gcdex(delta, overflow);
+            let diff = Expr::mem(target) - Expr::Int(value);
+            let count = Expr::Int(((u % overflow) + overflow) % overflow)
+                * Expr::div(diff.clone(), Expr::Int(gcd));
+
+            let mut replacement = Vec::new();
+
+            if gcd > 1 {
+                replacement.push(Node::If {
+                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
+                    children: vec![Node::While {
+                        cond: Cond::Always,
+                        children: Vec::new(),
+                    }],
+                });
+            }
+
+            for (&offset, delta_expr) in &deltas {
+                if offset == target {
+                    continue;
+                }
+                replacement.push(Node::SetMemory {
+                    offset,
+                    value: Expr::mem(offset) + delta_expr.clone() * count.clone(),
+                });
+            }
+
+            replacement.push(Node::SetMemory {
+                offset: target,
+                value: Expr::Int(value),
+            });
+
+            children.splice(i..=i, replacement.clone());
+            i += replacement.len();
+            continue;
+        }
+
+        i += 1;
+    }
+
+    cleanup::cleanup(children);
+}
+
+/// Flatten Repeat nodes where all children are SetMemory with invariant deltas.
+fn affine_repeat_pass(children: &mut Vec<Node>) {
+    let mut i = 0;
+    while i < children.len() {
+        let (count, kids) = match &children[i] {
+            Node::Repeat {
+                count,
+                children: kids,
+            } => (count.clone(), kids.clone()),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        let deltas = match summarize_body_general(&kids) {
             Some(d) => d,
             None => {
                 i += 1;
@@ -73,57 +258,22 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
             }
         };
 
-        let control_delta = *deltas.get(&target).unwrap_or(&0);
-        if control_delta == 0 {
-            i += 1;
-            continue;
-        }
-
-        let delta = ((value - control_delta) % overflow + overflow) % overflow;
-
-        if delta == 0 {
-            children[i] = Node::While {
-                cond: Cond::Always,
-                children: Vec::new(),
-            };
-            i += 1;
-            continue;
-        }
-
-        let (u, _v, gcd) = gcdex(delta, overflow);
-        let diff = Expr::mem(target) - Expr::Int(value);
-        let count = Expr::Int(((u % overflow) + overflow) % overflow)
-            * Expr::div(diff.clone(), Expr::Int(gcd));
-
         let mut replacement = Vec::new();
-
-        if gcd > 1 {
-            replacement.push(Node::If {
-                cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
-                children: vec![Node::While {
-                    cond: Cond::Always,
-                    children: Vec::new(),
-                }],
-            });
-        }
-
-        for (&offset, &delta_val) in &deltas {
-            if offset == target || delta_val == 0 {
-                continue;
-            }
+        for (&offset, delta_expr) in &deltas {
             replacement.push(Node::SetMemory {
                 offset,
-                value: Expr::mem(offset) + Expr::Int(delta_val) * count.clone(),
+                value: Expr::mem(offset) + delta_expr.clone() * count.clone(),
             });
         }
 
-        replacement.push(Node::SetMemory {
-            offset: target,
-            value: Expr::Int(value),
-        });
-
-        children.splice(i..=i, replacement.clone());
-        i += replacement.len();
+        if replacement.is_empty() {
+            children[i] = Node::Nop;
+            i += 1;
+        } else {
+            let n = replacement.len();
+            children.splice(i..=i, replacement);
+            i += n;
+        }
     }
 
     cleanup::cleanup(children);
@@ -258,6 +408,8 @@ mod tests {
 
     #[test]
     fn non_constant_delta_skipped() {
+        // Delta of cell 1 is {0}, which references the control cell (modified).
+        // This must be skipped because the delta changes each iteration.
         let mut kids = vec![Node::While {
             cond: Cond::MemNotEqual(0, 0),
             children: vec![
@@ -340,5 +492,367 @@ mod tests {
         }];
         affine_loop_pass(&mut kids, 16);
         assert!(!kids.iter().any(|n| matches!(n, Node::While { .. })));
+    }
+
+    // --- Generalized affine loop tests ---
+
+    #[test]
+    fn invariant_cell_reference_while() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+={2} }
+        // Cell 2 is not modified, so delta {2} is constant across iterations.
+        // Should be eliminated: p[1] += {2} * count; p[0] = 0
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "while loop should be eliminated"
+        );
+        assert!(
+            kids.iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))),
+            "control cell should be set to 0"
+        );
+        assert!(
+            kids.iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+            "cell 1 should be updated"
+        );
+    }
+
+    #[test]
+    fn invariant_cell_reference_value() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+={2} }
+        // Final p[1] = {1} + {2} * {0}
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        let cell1 = kids
+            .iter()
+            .find_map(|n| match n {
+                Node::SetMemory { offset: 1, value } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("cell 1 should have SetMemory");
+        // {1} + {2} * {0}  (count = {0}, delta = {2})
+        let expected = Expr::mem(1) + Expr::mem(2) * Expr::mem(0);
+        assert_eq!(cell1, expected);
+    }
+
+    #[test]
+    fn multiple_invariant_references() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+={2}+{3} }
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2) + Expr::mem(3),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "while loop should be eliminated"
+        );
+    }
+
+    #[test]
+    fn mixed_const_and_invariant_deltas() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+=3, p[2]+={3} }
+        // All constant or invariant deltas.
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::Int(3),
+                },
+                Node::SetMemory {
+                    offset: 2,
+                    value: Expr::mem(2) + Expr::mem(3),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        // The constant-delta fast path handles this (all deltas: -1, 3, {3}).
+        // Actually only delta 3 and -1 are constant; {3} is not. So fast path fails,
+        // general path handles it.
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "while loop should be eliminated"
+        );
+    }
+
+    #[test]
+    fn modified_cell_reference_skipped() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+=1, p[2]+={1} }
+        // Cell 1 IS modified, so delta {1} for cell 2 is NOT invariant.
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::Int(1),
+                },
+                Node::SetMemory {
+                    offset: 2,
+                    value: Expr::mem(2) + Expr::mem(1),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        // The constant-delta fast path handles p[0] and p[1] (deltas -1, 1) but
+        // p[2] has non-constant delta {1}. Fast path fails.
+        // General path: p[2] delta after symbolic exec = {1}+1 (p[1] was already
+        // updated to {1}+1 by the time we reach p[2]). References {1} which IS modified.
+        // So general path also fails.
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "should be unchanged due to modified cell reference"
+        );
+    }
+
+    #[test]
+    fn cross_dependency_skipped() {
+        // While(NE(0,0)) { p[0]-=1, p[1]+={2}, p[2]+=1 }
+        // Cell 2 IS modified, so delta {2} for cell 1 is NOT invariant.
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2),
+                },
+                Node::SetMemory {
+                    offset: 2,
+                    value: Expr::mem(2) + Expr::Int(1),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "should be unchanged due to cross-cell dependency"
+        );
+    }
+
+    #[test]
+    fn body_order_matters_for_general() {
+        // While(NE(0,0)) { p[1]+={2}, p[0]-=1 }
+        // Order: p[1] reads p[2] (invariant), then p[0] decremented.
+        // After symbolic exec: p[1] = {1}+{2}, p[0] = {0}-1. Deltas: {2} and -1.
+        // {2} references only invariant cell 2. Should be eliminated.
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2),
+                },
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(0) + Expr::Int(-1),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "while loop should be eliminated"
+        );
+    }
+
+    #[test]
+    fn non_constant_control_delta_skipped() {
+        // While(NE(0,0)) { p[0]={2}, p[1]+=1 }
+        // Control cell delta = {2}-{0}, non-constant. Must skip.
+        let mut kids = vec![Node::While {
+            cond: Cond::MemNotEqual(0, 0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 0,
+                    value: Expr::mem(2),
+                },
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::Int(1),
+                },
+            ],
+        }];
+        run_on(&mut kids);
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::While { .. })),
+            "should be unchanged"
+        );
+    }
+
+    // --- Repeat flattening tests ---
+
+    #[test]
+    fn repeat_invariant_delta_flattened() {
+        // Repeat { count: {0}, [SM(1, {1}+{2})] }
+        // Delta {2} is invariant. Should flatten to SM(1, {1}+{2}*{0}).
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(1) + Expr::mem(2),
+            }],
+        }];
+        affine_repeat_pass(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "repeat should be eliminated"
+        );
+        let cell1 = kids
+            .iter()
+            .find_map(|n| match n {
+                Node::SetMemory { offset: 1, value } => Some(value.clone()),
+                _ => None,
+            })
+            .expect("cell 1 should have SetMemory");
+        let expected = Expr::mem(1) + Expr::mem(2) * Expr::mem(0);
+        assert_eq!(cell1, expected);
+    }
+
+    #[test]
+    fn repeat_multiple_invariant_deltas() {
+        // Repeat { count: {0}, [SM(1, {1}+{3}), SM(2, {2}+{3})] }
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(3),
+                },
+                Node::SetMemory {
+                    offset: 2,
+                    value: Expr::mem(2) + Expr::mem(3),
+                },
+            ],
+        }];
+        affine_repeat_pass(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "repeat should be eliminated"
+        );
+        assert!(
+            kids.iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+        );
+        assert!(
+            kids.iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 2, .. })),
+        );
+    }
+
+    #[test]
+    fn repeat_modified_cell_ref_kept() {
+        // Repeat { count: {0}, [SM(1, {1}+{2}), SM(2, {2}+1)] }
+        // Cell 2 IS modified, so delta {2} for cell 1 is not invariant.
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![
+                Node::SetMemory {
+                    offset: 1,
+                    value: Expr::mem(1) + Expr::mem(2),
+                },
+                Node::SetMemory {
+                    offset: 2,
+                    value: Expr::mem(2) + Expr::Int(1),
+                },
+            ],
+        }];
+        affine_repeat_pass(&mut kids);
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "repeat should be preserved"
+        );
+    }
+
+    #[test]
+    fn repeat_const_delta_flattened() {
+        // Repeat { count: {0}, [SM(1, {1}+5)] }
+        // Constant delta 5, invariant. Should flatten.
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(1) + Expr::Int(5),
+            }],
+        }];
+        affine_repeat_pass(&mut kids);
+        assert!(
+            !kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "repeat should be eliminated"
+        );
+        let cell1 = kids
+            .iter()
+            .find_map(|n| match n {
+                Node::SetMemory { offset: 1, value } => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let expected = Expr::mem(1) + Expr::Int(5) * Expr::mem(0);
+        assert_eq!(cell1, expected);
+    }
+
+    #[test]
+    fn repeat_set_operation_kept() {
+        // Repeat { count: {0}, [SM(1, {3})] }
+        // This is a SET (not adjust): delta = {3}-{1}, references cell 1 which IS modified.
+        // Cannot flatten.
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(3),
+            }],
+        }];
+        affine_repeat_pass(&mut kids);
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "repeat with set operation should be preserved"
+        );
     }
 }

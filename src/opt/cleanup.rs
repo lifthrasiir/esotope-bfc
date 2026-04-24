@@ -34,7 +34,11 @@ pub fn cleanup(children: &mut Vec<Node>) {
                 children: ref kids,
             } => {
                 let all_set_memory = kids.iter().all(|c| matches!(c, Node::SetMemory { .. }));
-                if all_set_memory {
+                let all_deltas_simple = all_set_memory
+                    && kids.iter().all(|c| {
+                        matches!(c, Node::SetMemory { offset, value } if (value - &Expr::mem(*offset)).is_simple())
+                    });
+                if all_deltas_simple {
                     let has_set = kids
                         .iter()
                         .any(|c| matches!(c, Node::SetMemory { value, .. } if value.is_simple()));
@@ -47,9 +51,7 @@ pub fn cleanup(children: &mut Vec<Node>) {
                         for inode in &mut children {
                             if let Node::SetMemory { offset, value } = inode {
                                 let delta = &*value - &Expr::mem(*offset);
-                                if delta.is_simple() {
-                                    *value = Expr::mem(*offset) + delta * count.clone();
-                                }
+                                *value = Expr::mem(*offset) + delta * count.clone();
                             }
                         }
                         if has_set {
@@ -148,5 +150,21 @@ mod tests {
         cleanup(&mut kids);
         assert_eq!(kids.len(), 1);
         assert!(matches!(&kids[0], Node::MovePointer { offset: 5 }));
+    }
+
+    #[test]
+    fn repeat_with_non_simple_delta_preserved() {
+        let mut kids = vec![Node::Repeat {
+            count: Expr::mem(0),
+            children: vec![Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(1) + Expr::mem(2),
+            }],
+        }];
+        cleanup(&mut kids);
+        assert!(
+            kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
+            "Repeat with non-simple delta must not be flattened"
+        );
     }
 }
