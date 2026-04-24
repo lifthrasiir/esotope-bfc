@@ -77,16 +77,18 @@ impl TailDead {
             TailDead::AllExcept(live) => {
                 TailDead::AllExcept(live.iter().map(|c| c + offset).collect())
             }
-            TailDead::Set(dead) => {
-                TailDead::Set(dead.iter().map(|c| c + offset).collect())
-            }
+            TailDead::Set(dead) => TailDead::Set(dead.iter().map(|c| c + offset).collect()),
         }
     }
 }
 
 fn visit(node: &mut Node, parent_tail: &TailDead) {
     let is_program = matches!(node, Node::Program { .. });
-    let block_dead = if is_program { TailDead::All } else { parent_tail.clone() };
+    let block_dead = if is_program {
+        TailDead::All
+    } else {
+        parent_tail.clone()
+    };
 
     if let Some(children) = node.children_mut() {
         let child_tails = compute_child_tails(children, &block_dead);
@@ -98,11 +100,7 @@ fn visit(node: &mut Node, parent_tail: &TailDead) {
                     &children[i],
                     Node::If { children: kids, .. } if stride(kids) == Some(0)
                 );
-            let child_dead = if propagate {
-                &child_tails[i]
-            } else {
-                &no_dead
-            };
+            let child_dead = if propagate { &child_tails[i] } else { &no_dead };
             visit(&mut children[i], child_dead);
         }
 
@@ -247,12 +245,10 @@ mod tests {
 
     #[test]
     fn dead_store_at_program_end() {
-        let nodes = vec![
-            Node::SetMemory {
-                offset: 0,
-                value: Expr::Int(5),
-            },
-        ];
+        let nodes = vec![Node::SetMemory {
+            offset: 0,
+            value: Expr::Int(5),
+        }];
         let result = run_remove_dead(nodes);
         assert!(result.is_empty(), "trailing dead store should be removed");
     }
@@ -268,13 +264,17 @@ mod tests {
                 offset: 0,
                 value: Expr::Int(10),
             },
-            Node::Output {
-                expr: Expr::mem(0),
-            },
+            Node::Output { expr: Expr::mem(0) },
         ];
         let result = run_remove_dead(nodes);
         assert_eq!(result.len(), 2);
-        assert!(matches!(&result[0], Node::SetMemory { value: Expr::Int(10), .. }));
+        assert!(matches!(
+            &result[0],
+            Node::SetMemory {
+                value: Expr::Int(10),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -294,9 +294,7 @@ mod tests {
                 offset: 0,
                 value: Expr::Int(10),
             },
-            Node::Output {
-                expr: Expr::mem(0),
-            },
+            Node::Output { expr: Expr::mem(0) },
         ];
         let result = run_remove_dead(nodes);
         // The If should become empty/nop and be removed
@@ -320,9 +318,7 @@ mod tests {
                     value: Expr::Int(5),
                 }],
             },
-            Node::Output {
-                expr: Expr::mem(0),
-            },
+            Node::Output { expr: Expr::mem(0) },
         ];
         let result = run_remove_dead(nodes);
         assert!(
@@ -374,9 +370,7 @@ mod tests {
                 offset: 0,
                 value: Expr::Int(10),
             },
-            Node::Output {
-                expr: Expr::mem(0),
-            },
+            Node::Output { expr: Expr::mem(0) },
         ];
         let result = run_remove_dead(nodes);
         assert!(
@@ -409,9 +403,7 @@ mod tests {
                 offset: 0,
                 value: Expr::Int(20),
             },
-            Node::Output {
-                expr: Expr::mem(1),
-            },
+            Node::Output { expr: Expr::mem(1) },
         ];
         let result = run_remove_dead(nodes);
         // If should still exist (has live store for p[1])
@@ -451,9 +443,7 @@ mod tests {
                 offset: 0,
                 value: Expr::Int(10),
             },
-            Node::Output {
-                expr: Expr::mem(0),
-            },
+            Node::Output { expr: Expr::mem(0) },
         ];
         let result = run_remove_dead(nodes);
         assert!(
@@ -484,9 +474,13 @@ mod tests {
         ];
         let result = run_remove_dead(nodes);
         // While should still exist with both stores
-        if let Some(Node::While { children, .. }) = result.iter().find(|n| matches!(n, Node::While { .. })) {
+        if let Some(Node::While { children, .. }) =
+            result.iter().find(|n| matches!(n, Node::While { .. }))
+        {
             assert!(
-                children.iter().any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+                children
+                    .iter()
+                    .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
                 "While body store should be preserved: {:?}",
                 children
             );
@@ -501,9 +495,7 @@ mod tests {
             Node::Input { offset: 1 },
             Node::If {
                 cond: Cond::MemNotEqual(1, 0),
-                children: vec![Node::Output {
-                    expr: Expr::mem(0),
-                }],
+                children: vec![Node::Output { expr: Expr::mem(0) }],
             },
             Node::SetMemory {
                 offset: 0,

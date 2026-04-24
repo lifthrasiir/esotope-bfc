@@ -150,7 +150,8 @@ fn simplify_cond_with_env(cond: &mut Cond, env: &Env) {
 fn merge_cell_value(a: &CellValue, b: &CellValue) -> Option<CellValue> {
     match (a, b) {
         (CellValue::Const(x), CellValue::Const(y)) if x == y => Some(CellValue::Const(*x)),
-        (CellValue::Const(x), CellValue::Mod(m, r)) | (CellValue::Mod(m, r), CellValue::Const(x)) => {
+        (CellValue::Const(x), CellValue::Mod(m, r))
+        | (CellValue::Mod(m, r), CellValue::Const(x)) => {
             if x.rem_euclid(*m) == *r {
                 Some(CellValue::Mod(*m, *r))
             } else {
@@ -223,10 +224,8 @@ fn invalidate_env_for_body(env: &mut Env, body: &[Node]) {
             env.clear();
             return;
         }
-        for opt in &updates.unsure {
-            if let Some(off) = opt {
-                env.remove(off);
-            }
+        for off in updates.unsure.iter().flatten() {
+            env.remove(off);
         }
     }
 }
@@ -250,10 +249,8 @@ fn update_env_from_body(env: &mut Env, body: &[Node]) {
                     env.clear();
                     return;
                 }
-                for opt in &updates.unsure {
-                    if let Some(off) = opt {
-                        env.remove(off);
-                    }
+                for off in updates.unsure.iter().flatten() {
+                    env.remove(off);
                 }
             }
         }
@@ -292,7 +289,10 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 }
             }
 
-            Node::If { cond, children: body } => {
+            Node::If {
+                cond,
+                children: body,
+            } => {
                 let substs = env_to_substs(&env);
                 if !substs.is_empty() {
                     *cond = cond.with_memory(&substs);
@@ -317,7 +317,10 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 }
             }
 
-            Node::While { cond, children: body } => {
+            Node::While {
+                cond,
+                children: body,
+            } => {
                 let substs = env_to_substs(&env);
                 if !substs.is_empty() {
                     let eval = cond.with_memory(&substs);
@@ -333,7 +336,10 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 }
             }
 
-            Node::Repeat { count, children: body } => {
+            Node::Repeat {
+                count,
+                children: body,
+            } => {
                 let substs = env_to_substs(&env);
                 if !substs.is_empty() {
                     *count = count.with_memory(&substs);
@@ -422,9 +428,7 @@ mod tests {
     fn constant_prop_in_if_body() {
         let mut nodes = vec![Node::If {
             cond: Cond::MemEqual(0, 65),
-            children: vec![Node::Output {
-                expr: Expr::mem(0),
-            }],
+            children: vec![Node::Output { expr: Expr::mem(0) }],
         }];
         run(&mut nodes);
         if let Some(Node::If { children, .. }) = nodes.first() {
@@ -1047,10 +1051,7 @@ mod tests {
         let mut env = Env::new();
         env.insert(1, CellValue::Mod(3, 1));
         let expr = Expr::Int(2) * Expr::mem(1);
-        assert_eq!(
-            derive_cell_value(&expr, &env),
-            Some(CellValue::Mod(6, 2))
-        );
+        assert_eq!(derive_cell_value(&expr, &env), Some(CellValue::Mod(6, 2)));
     }
 
     #[test]
@@ -1058,10 +1059,7 @@ mod tests {
         // 2 * mem(1) where mem(1) is unknown → Mod(2, 0)
         let env = Env::new();
         let expr = Expr::Int(2) * Expr::mem(1);
-        assert_eq!(
-            derive_cell_value(&expr, &env),
-            Some(CellValue::Mod(2, 0))
-        );
+        assert_eq!(derive_cell_value(&expr, &env), Some(CellValue::Mod(2, 0)));
     }
 
     #[test]

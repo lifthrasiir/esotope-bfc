@@ -304,8 +304,9 @@ mod tests {
         let mut kids = parse_and_flatten("[->+<]");
         run_on(&mut kids);
         assert!(
-            kids.iter()
-                .any(|n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))),
+            kids.iter().any(
+                |n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))
+            ),
             "control cell should be set to 0"
         );
         assert!(
@@ -439,9 +440,7 @@ mod tests {
                     offset: 0,
                     value: Expr::mem(0) + Expr::Int(-1),
                 },
-                Node::Output {
-                    expr: Expr::mem(0),
-                },
+                Node::Output { expr: Expr::mem(0) },
             ],
         }];
         run_on(&mut kids);
@@ -520,8 +519,9 @@ mod tests {
             "while loop should be eliminated"
         );
         assert!(
-            kids.iter()
-                .any(|n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))),
+            kids.iter().any(
+                |n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))
+            ),
             "control cell should be set to 0"
         );
         assert!(
@@ -776,14 +776,12 @@ mod tests {
             !kids.iter().any(|n| matches!(n, Node::Repeat { .. })),
             "repeat should be eliminated"
         );
-        assert!(
-            kids.iter()
-                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
-        );
-        assert!(
-            kids.iter()
-                .any(|n| matches!(n, Node::SetMemory { offset: 2, .. })),
-        );
+        assert!(kids
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),);
+        assert!(kids
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 2, .. })),);
     }
 
     #[test]

@@ -86,10 +86,8 @@ impl CopyState {
                         self.clear();
                         return;
                     }
-                    for opt in &updates.unsure {
-                        if let Some(off) = opt {
-                            self.invalidate_cell(*off);
-                        }
+                    for off in updates.unsure.iter().flatten() {
+                        self.invalidate_cell(*off);
                     }
                 }
             }
@@ -111,13 +109,12 @@ fn merge_states(a: &CopyState, b: &CopyState) -> CopyState {
 
     for (expr, &leader_a) in &a.leaders {
         if let Some(&leader_b) = b.leaders.get(expr) {
-            if leader_a == leader_b {
-                if values.get(&leader_a) == Some(expr)
+            if leader_a == leader_b
+                && (values.get(&leader_a) == Some(expr)
                     || a.values.get(&leader_a) == Some(expr)
-                        && b.values.get(&leader_a) == Some(expr)
-                {
-                    leaders.insert(expr.clone(), leader_a);
-                }
+                        && b.values.get(&leader_a) == Some(expr))
+            {
+                leaders.insert(expr.clone(), leader_a);
             }
         }
     }
@@ -193,7 +190,11 @@ fn copy_prop_pass(children: &mut Vec<Node>) {
                     // dead branch, state unchanged
                 } else if cond.is_always() {
                     let mut node = std::mem::replace(&mut children[i], Node::Nop);
-                    if let Node::If { children: ref mut body, .. } = &mut node {
+                    if let Node::If {
+                        children: ref mut body,
+                        ..
+                    } = &mut node
+                    {
                         copy_prop_pass(body);
                         state.update_from_body(body);
                     }
@@ -201,7 +202,11 @@ fn copy_prop_pass(children: &mut Vec<Node>) {
                 } else {
                     let mut true_state = state.clone();
                     let mut node = std::mem::replace(&mut children[i], Node::Nop);
-                    if let Node::If { children: ref mut body, .. } = &mut node {
+                    if let Node::If {
+                        children: ref mut body,
+                        ..
+                    } = &mut node
+                    {
                         copy_prop_pass(body);
                         true_state.update_from_body(body);
                     }
@@ -281,9 +286,7 @@ mod tests {
                 offset: 1,
                 value: Expr::mem(0),
             },
-            Node::Output {
-                expr: Expr::mem(1),
-            },
+            Node::Output { expr: Expr::mem(1) },
         ];
         run_copy_prop(&mut nodes);
         if let Node::Output { expr } = &nodes[1] {
@@ -473,7 +476,11 @@ mod tests {
             .iter()
             .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
         if let Some(Node::SetMemory { value, .. }) = set4 {
-            assert_eq!(*value, Expr::mem(0), "alias p[1]=p[0] should survive unrelated If");
+            assert_eq!(
+                *value,
+                Expr::mem(0),
+                "alias p[1]=p[0] should survive unrelated If"
+            );
         } else {
             panic!("expected SetMemory at offset 4");
         }
@@ -538,7 +545,11 @@ mod tests {
             .iter()
             .find(|n| matches!(n, Node::SetMemory { offset: 3, .. }));
         if let Some(Node::SetMemory { value, .. }) = set3 {
-            assert_eq!(*value, Expr::mem(1), "alias should be lost after conflicting branch");
+            assert_eq!(
+                *value,
+                Expr::mem(1),
+                "alias should be lost after conflicting branch"
+            );
         } else {
             panic!("expected SetMemory at offset 3");
         }
@@ -568,7 +579,11 @@ mod tests {
             .iter()
             .find(|n| matches!(n, Node::SetMemory { offset: 3, .. }));
         if let Some(Node::SetMemory { value, .. }) = set3 {
-            assert_eq!(*value, Expr::mem(1), "alias should be lost when referenced cell is modified");
+            assert_eq!(
+                *value,
+                Expr::mem(1),
+                "alias should be lost when referenced cell is modified"
+            );
         } else {
             panic!("expected SetMemory at offset 3");
         }
@@ -654,14 +669,16 @@ mod tests {
                     value: Expr::Int(5),
                 }],
             },
-            Node::Output {
-                expr: Expr::mem(1),
-            },
+            Node::Output { expr: Expr::mem(1) },
         ];
         run_copy_prop(&mut nodes);
         let output = nodes.iter().find(|n| matches!(n, Node::Output { .. }));
         if let Some(Node::Output { expr }) = output {
-            assert_eq!(*expr, Expr::mem(0), "Output should be canonicalized after unrelated If");
+            assert_eq!(
+                *expr,
+                Expr::mem(0),
+                "Output should be canonicalized after unrelated If"
+            );
         } else {
             panic!("expected Output");
         }

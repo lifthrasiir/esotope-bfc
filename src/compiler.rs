@@ -50,7 +50,12 @@ impl Compiler {
         out: &mut W,
         used_cells: Option<&BTreeSet<i32>>,
     ) -> std::io::Result<()> {
-        let gen = Generator::new(self.cellsize, self.debugging, used_cells, self.lower_to_vars);
+        let gen = Generator::new(
+            self.cellsize,
+            self.debugging,
+            used_cells,
+            self.lower_to_vars,
+        );
         gen.generate(node, out)
     }
 
@@ -293,7 +298,8 @@ mod tests {
         let output = compile_bf(src);
         // The key check: p[1] should be output, and ideally as a constant
         assert!(
-            output.contains("PUTC(65)") || output.contains("PUTS(\"A\")")
+            output.contains("PUTC(65)")
+                || output.contains("PUTS(\"A\")")
                 || output.contains("p[1]"),
             "p[1] should be preserved or constant-folded: {}",
             output

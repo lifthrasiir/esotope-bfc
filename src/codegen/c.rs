@@ -161,7 +161,11 @@ impl<'a> GenState<'a> {
                 return String::new();
             }
             let short = format!("{delta_str};");
-            if short.len() < full.len() { short } else { full }
+            if short.len() < full.len() {
+                short
+            } else {
+                full
+            }
         } else {
             let short_len = {
                 let mut c = LenCounter(0);
@@ -232,11 +236,7 @@ impl<'a> GenState<'a> {
                             .collect();
                         self.writeln(
                             f,
-                            format_args!(
-                                "static uint{}_t {};",
-                                self.cellsize,
-                                decls.join(", ")
-                            ),
+                            format_args!("static uint{}_t {};", self.cellsize, decls.join(", ")),
                         )?;
                         self.writeln(f, format_args!("int main(void) {{"))?;
                     }
@@ -256,10 +256,7 @@ impl<'a> GenState<'a> {
                         };
                         self.writeln(
                             f,
-                            format_args!(
-                                "static uint{}_t m[{}], *p = m;",
-                                self.cellsize, arr_size
-                            ),
+                            format_args!("static uint{}_t m[{}], *p = m;", self.cellsize, arr_size),
                         )?;
                     } else {
                         let min = *cells.iter().next().unwrap();
@@ -267,9 +264,7 @@ impl<'a> GenState<'a> {
                             f,
                             format_args!(
                                 "static uint{}_t m[{}], *p = m + {};",
-                                self.cellsize,
-                                size,
-                                -min
+                                self.cellsize, size, -min
                             ),
                         )?;
                     }
@@ -313,10 +308,7 @@ impl<'a> GenState<'a> {
                 };
                 let var = self.newvariable(f, "loopcnt")?;
                 let ce = self.format_expr(&count_expr);
-                self.writeln(
-                    f,
-                    format_args!("for ({var} = {ce}; {var} > 0; --{var}) {{"),
-                )?;
+                self.writeln(f, format_args!("for ({var} = {ce}; {var} > 0; --{var}) {{"))?;
                 self.nindents += 1;
                 for child in children {
                     self.write_node(f, child)?;
@@ -664,7 +656,13 @@ fn format_var_expr(expr: &Expr, prec: u32, vm: &VarMode) -> String {
             if prec > 3 {
                 s.push('(');
             }
-            write!(s, "{}/{}", format_var_expr(l, 2, vm), format_var_expr(r, 2, vm)).unwrap();
+            write!(
+                s,
+                "{}/{}",
+                format_var_expr(l, 2, vm),
+                format_var_expr(r, 2, vm)
+            )
+            .unwrap();
             if prec > 3 {
                 s.push(')');
             }
@@ -675,7 +673,13 @@ fn format_var_expr(expr: &Expr, prec: u32, vm: &VarMode) -> String {
             if prec > 3 {
                 s.push('(');
             }
-            write!(s, "{}%{}", format_var_expr(l, 2, vm), format_var_expr(r, 2, vm)).unwrap();
+            write!(
+                s,
+                "{}%{}",
+                format_var_expr(l, 2, vm),
+                format_var_expr(r, 2, vm)
+            )
+            .unwrap();
             if prec > 3 {
                 s.push(')');
             }
@@ -728,9 +732,7 @@ fn format_var_cond(cond: &Cond, vm: &VarMode) -> String {
                         (None, Some(mx)) => write!(s, "{e} <= {mx}").unwrap(),
                         (Some(mn), None) => write!(s, "{mn} <= {e}").unwrap(),
                         (Some(mn), Some(mx)) if mn == mx => write!(s, "{e} == {mn}").unwrap(),
-                        (Some(mn), Some(mx)) => {
-                            write!(s, "({mn} <= {e} && {e} <= {mx})").unwrap()
-                        }
+                        (Some(mn), Some(mx)) => write!(s, "({mn} <= {e} && {e} <= {mx})").unwrap(),
                         (None, None) => s.push('1'),
                     }
                 }

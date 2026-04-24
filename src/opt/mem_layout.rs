@@ -102,9 +102,7 @@ mod tests {
                     offset: 1,
                     value: Expr::mem(0) + Expr::Int(1),
                 },
-                Node::Output {
-                    expr: Expr::mem(1),
-                },
+                Node::Output { expr: Expr::mem(1) },
             ],
         };
         let cells = analyze(&node).unwrap();
@@ -120,9 +118,7 @@ mod tests {
                     offset: 0,
                     value: Expr::Int(1),
                 },
-                Node::Output {
-                    expr: Expr::mem(0),
-                },
+                Node::Output { expr: Expr::mem(0) },
             ],
         };
         let cells = analyze(&node).unwrap();
@@ -225,9 +221,7 @@ mod tests {
                     value: Expr::Int(2),
                 },
                 Node::MovePointer { offset: -2 },
-                Node::Output {
-                    expr: Expr::mem(0),
-                },
+                Node::Output { expr: Expr::mem(0) },
             ],
         };
         let cells = analyze(&node).unwrap();
