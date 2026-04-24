@@ -118,7 +118,7 @@ impl<'a> GenState<'a> {
         let index = self.nextvars.entry(prefix.to_string()).or_insert(0);
         let name = format!("{prefix}{index}");
         *index += 1;
-        self.writeln(f, format_args!("int {};", name))?;
+        self.writeln(f, format_args!("uint{}_t {};", self.cellsize, name))?;
         Ok(name)
     }
 
@@ -301,7 +301,9 @@ impl<'a> GenState<'a> {
                 self.writeln(f, format_args!("}}"))?;
             }
             Node::Repeat { count, children } => {
-                let count_expr = if count.is_simple() || !matches!(count, Expr::Reference(_)) {
+                let count_expr = if self.cellsize == 32 {
+                    count.clone()
+                } else if count.is_simple() || !matches!(count, Expr::Reference(_)) {
                     Expr::modulo(count.clone(), Expr::Int(1 << self.cellsize))
                 } else {
                     count.clone()
@@ -787,6 +789,10 @@ fn format_var_adjust(refname: &str, value: &Expr, vm: &VarMode) -> String {
 }
 
 fn adopt_cond(cond: &Cond, cellsize: u32) -> Cond {
+    if cellsize == 32 {
+        return cond.clone();
+    }
+
     match cond {
         Cond::Range(expr, ranges) => {
             let mut multiples = BTreeSet::new();

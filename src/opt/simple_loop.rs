@@ -1,6 +1,6 @@
 use crate::cond::*;
 use crate::expr::*;
-use crate::math::gcdex;
+use crate::math::gcdex_i64;
 use crate::nodes::*;
 use crate::opt::cleanup;
 
@@ -18,7 +18,7 @@ fn visit(node: &mut Node, cellsize: u32) {
 }
 
 fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
-    let overflow: i32 = 1 << cellsize;
+    let overflow: i64 = 1i64 << cellsize;
 
     let mut i = 0;
     while i < children.len() {
@@ -107,7 +107,7 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
             continue;
         }
         let cell_val = cell.to_int().unwrap();
-        let delta = ((value - cell_val) % overflow + overflow) % overflow;
+        let delta = ((i64::from(value) - i64::from(cell_val)) % overflow + overflow) % overflow;
 
         if mode > 0 {
             if delta == 0 {
@@ -153,10 +153,14 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 continue;
             }
 
-            let (u, _v, gcd) = gcdex(delta, overflow);
+            let (u, _v, gcd) = gcdex_i64(delta, overflow);
+            if gcd > i64::from(i32::MAX) {
+                i += 1;
+                continue;
+            }
             let diff = Expr::mem(target) - Expr::Int(value);
-            let count = Expr::Int(((u % overflow) + overflow) % overflow)
-                * Expr::div(diff.clone(), Expr::Int(gcd));
+            let count = Expr::Int((((u % overflow) + overflow) % overflow) as i32)
+                * Expr::div(diff.clone(), Expr::Int(gcd as i32));
 
             let inodes: Vec<Node> = kids
                 .into_iter()
@@ -168,7 +172,7 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
             let mut replacement = Vec::new();
             if gcd > 1 {
                 replacement.push(Node::If {
-                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
+                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd as i32)), 0),
                     children: vec![Node::While {
                         cond: Cond::Always,
                         children: Vec::new(),
@@ -213,10 +217,28 @@ mod tests {
         }
     }
 
+    fn compile_and_get_children_with_cellsize(src: &str, cellsize: u32) -> Vec<Node> {
+        let mut node = brainfuck::parse(BufReader::new(src.as_bytes())).unwrap();
+        crate::opt::flatten::transform(&mut node);
+        transform(&mut node, cellsize);
+        match node {
+            Node::Program { children } => children,
+            _ => panic!("expected Program"),
+        }
+    }
+
     #[test]
     fn clear_loop_becomes_set_zero() {
         // [-] -> SetMemory(0, 0)
         let kids = compile_and_get_children("[-]");
+        assert!(kids
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))));
+    }
+
+    #[test]
+    fn clear_loop_cellsize_32_does_not_overflow() {
+        let kids = compile_and_get_children_with_cellsize("[-]", 32);
         assert!(kids
             .iter()
             .any(|n| matches!(n, Node::SetMemory { offset: 0, value } if *value == Expr::Int(0))));

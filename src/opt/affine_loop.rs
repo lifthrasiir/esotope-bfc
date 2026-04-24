@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cond::*;
 use crate::expr::*;
-use crate::math::gcdex;
+use crate::math::gcdex_i64;
 use crate::nodes::*;
 use crate::opt::cleanup;
 
@@ -106,7 +106,7 @@ fn summarize_body_general(kids: &[Node]) -> Option<BTreeMap<i32, CellSummary>> {
 }
 
 fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
-    let overflow: i32 = 1 << cellsize;
+    let overflow: i64 = 1i64 << cellsize;
 
     let mut i = 0;
     while i < children.len() {
@@ -142,7 +142,8 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 continue;
             }
 
-            let delta = ((value - control_delta) % overflow + overflow) % overflow;
+            let delta =
+                ((i64::from(value) - i64::from(control_delta)) % overflow + overflow) % overflow;
 
             if delta == 0 {
                 children[i] = Node::While {
@@ -153,16 +154,20 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 continue;
             }
 
-            let (u, _v, gcd) = gcdex(delta, overflow);
+            let (u, _v, gcd) = gcdex_i64(delta, overflow);
+            if gcd > i64::from(i32::MAX) {
+                i += 1;
+                continue;
+            }
             let diff = Expr::mem(target) - Expr::Int(value);
-            let count = Expr::Int(((u % overflow) + overflow) % overflow)
-                * Expr::div(diff.clone(), Expr::Int(gcd));
+            let count = Expr::Int((((u % overflow) + overflow) % overflow) as i32)
+                * Expr::div(diff.clone(), Expr::Int(gcd as i32));
 
             let mut replacement = Vec::new();
 
             if gcd > 1 {
                 replacement.push(Node::If {
-                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
+                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd as i32)), 0),
                     children: vec![Node::While {
                         cond: Cond::Always,
                         children: Vec::new(),
@@ -215,7 +220,8 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 continue;
             }
 
-            let delta = ((value - control_delta) % overflow + overflow) % overflow;
+            let delta =
+                ((i64::from(value) - i64::from(control_delta)) % overflow + overflow) % overflow;
 
             if delta == 0 {
                 children[i] = Node::While {
@@ -226,16 +232,20 @@ fn affine_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 continue;
             }
 
-            let (u, _v, gcd) = gcdex(delta, overflow);
+            let (u, _v, gcd) = gcdex_i64(delta, overflow);
+            if gcd > i64::from(i32::MAX) {
+                i += 1;
+                continue;
+            }
             let diff = Expr::mem(target) - Expr::Int(value);
-            let count = Expr::Int(((u % overflow) + overflow) % overflow)
-                * Expr::div(diff.clone(), Expr::Int(gcd));
+            let count = Expr::Int((((u % overflow) + overflow) % overflow) as i32)
+                * Expr::div(diff.clone(), Expr::Int(gcd as i32));
 
             let mut replacement = Vec::new();
 
             if gcd > 1 {
                 replacement.push(Node::If {
-                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd)), 0),
+                    cond: Cond::not_equal(Expr::modulo(diff, Expr::Int(gcd as i32)), 0),
                     children: vec![Node::While {
                         cond: Cond::Always,
                         children: Vec::new(),
