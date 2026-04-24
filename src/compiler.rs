@@ -147,6 +147,33 @@ mod tests {
     }
 
     #[test]
+    fn empty_loop_on_known_zero_cell_is_removed() {
+        let output = compile_bf(">[]<+.");
+        assert!(
+            !output.contains("while (1);"),
+            "known-zero empty loop should be removed: {}",
+            output
+        );
+        assert!(
+            output.contains("PUTC(1)") || output.contains("PUTS(\"\\001\")"),
+            "program should continue past skipped loop: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn regression_no_spurious_infinite_loop() {
+        let src = ">++++++++[-<+++++++++>]<.>[][<-]>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.\n\
+                   >->+++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
+        let output = compile_bf(src);
+        assert!(
+            !output.contains("while (1); /* infinite loop */"),
+            "bad.b should not compile to a spurious infinite loop: {}",
+            output
+        );
+    }
+
+    #[test]
     fn cellsize_16() {
         let compiler = Compiler::new(16, false);
         let mut out = Vec::new();
@@ -368,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_program_regression_puts_once_with_exact_message() {
+    fn regression_puts_once_with_exact_message() {
         let src = "
             >[-]<[-]++++++[->+++++++++++<]>+.-[---<+++++>]<+.--.+++.+++++.-.>+++++[<
             ---->-]<+.->+++++[<++++>-]<.-----------.++++++.-.--[--->+<]>----.+++++[-

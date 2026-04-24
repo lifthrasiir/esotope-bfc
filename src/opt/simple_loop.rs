@@ -114,7 +114,10 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 let replacement = vec![
                     Node::If {
                         cond: cond.clone(),
-                        children: kids,
+                        children: vec![Node::While {
+                            cond: Cond::Always,
+                            children: kids,
+                        }],
                     },
                     Node::SetMemory {
                         offset: target,
@@ -134,14 +137,20 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                         children: kids,
                     };
                 }
-                children[i] = infloop;
+                children[i] = Node::If {
+                    cond: cond.clone(),
+                    children: vec![infloop],
+                };
                 i += 1;
             }
         } else if flag {
             if delta == 0 {
-                children[i] = Node::While {
-                    cond: Cond::Always,
-                    children: Vec::new(),
+                children[i] = Node::If {
+                    cond: cond.clone(),
+                    children: vec![Node::While {
+                        cond: Cond::Always,
+                        children: Vec::new(),
+                    }],
                 };
                 i += 1;
                 continue;
