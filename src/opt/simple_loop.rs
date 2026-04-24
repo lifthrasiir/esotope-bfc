@@ -114,10 +114,7 @@ fn simple_loop_pass(children: &mut Vec<Node>, cellsize: u32) {
                 let replacement = vec![
                     Node::If {
                         cond: cond.clone(),
-                        children: vec![Node::While {
-                            cond: Cond::Always,
-                            children: kids,
-                        }],
+                        children: kids,
                     },
                     Node::SetMemory {
                         offset: target,
@@ -249,5 +246,26 @@ mod tests {
         let kids = compile_and_get_children("[>+]");
         // Should still be a While
         assert!(kids.iter().any(|n| matches!(n, Node::While { .. })));
+    }
+
+    #[test]
+    fn loop_that_sets_control_to_exit_value_is_not_infinite() {
+        let kids = compile_and_get_children("[[-]]");
+        assert!(
+            !contains_empty_infinite_loop(&kids),
+            "loop body that sets the control cell to zero should run once, not become infinite: {:?}",
+            kids
+        );
+    }
+
+    fn contains_empty_infinite_loop(nodes: &[Node]) -> bool {
+        nodes.iter().any(|node| match node {
+            Node::While { cond, children } if cond.is_always() && children.is_empty() => true,
+            Node::Program { children }
+            | Node::If { children, .. }
+            | Node::Repeat { children, .. }
+            | Node::While { children, .. } => contains_empty_infinite_loop(children),
+            _ => false,
+        })
     }
 }
