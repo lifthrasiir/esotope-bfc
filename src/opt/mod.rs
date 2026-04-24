@@ -1,4 +1,5 @@
 pub mod cleanup;
+pub mod copy_prop;
 pub mod flatten;
 pub mod initial_memory;
 pub mod more_loop;

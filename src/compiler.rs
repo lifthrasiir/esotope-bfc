@@ -26,6 +26,7 @@ impl Compiler {
         opt::simple_loop::transform(node, self.cellsize);
         opt::propagate::transform(node);
         opt::more_loop::transform(node);
+        opt::copy_prop::transform(node);
         opt::remove_dead::transform(node);
         opt::stdlib::transform(node);
     }
