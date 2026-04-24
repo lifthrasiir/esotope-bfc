@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::expr::*;
 use crate::nodes::*;
+use crate::opt::alias_oracle;
 use crate::opt::cleanup;
 
 #[derive(Clone)]
@@ -69,7 +70,11 @@ impl CopyState {
 
     fn invalidate_body_updates(&mut self, body: &[Node]) {
         if stride(body) != Some(0) {
-            self.clear();
+            if let Some(modulus) = alias_oracle::body_modulus(body) {
+                self.invalidate_non_disjoint(modulus);
+            } else {
+                self.clear();
+            }
             return;
         }
 
@@ -83,6 +88,36 @@ impl CopyState {
                 self.invalidate_cell(*off);
             }
         }
+    }
+
+    fn invalidate_non_disjoint(&mut self, modulus: i32) {
+        let affected_offsets: Vec<i32> = self
+            .values
+            .keys()
+            .filter(|&&off| !alias_oracle::cell_disjoint_from_seek(off, modulus))
+            .copied()
+            .collect();
+        for off in affected_offsets {
+            self.invalidate_cell(off);
+        }
+        let cell_refs_in_lane: Vec<Expr> = self
+            .leaders
+            .keys()
+            .filter(|expr| {
+                expr.references()
+                    .iter()
+                    .any(|r| r.to_int().map_or(true, |o| !alias_oracle::cell_disjoint_from_seek(o, modulus)))
+            })
+            .cloned()
+            .collect();
+        for expr in cell_refs_in_lane {
+            self.leaders.remove(&expr);
+        }
+        self.values.retain(|_, v| {
+            !v.references().iter().any(|r| {
+                r.to_int().map_or(true, |o| !alias_oracle::cell_disjoint_from_seek(o, modulus))
+            })
+        });
     }
 }
 
@@ -856,6 +891,159 @@ mod tests {
             assert_eq!(*value, Expr::mem(1));
         } else {
             panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    // --- Alias oracle integration tests ---
+
+    #[test]
+    fn seek_stride3_preserves_disjoint_alias() {
+        // p[1] = p[2]; While([>>>]) { ... }; p[4] = p[1]
+        // The While body has SeekMemory(stride=3), which only touches lane 0 mod 3.
+        // p[1] and p[2] are in lanes 1 and 2, so the alias p[1]=p[2] should survive.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(2),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 3,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(
+                *value,
+                Expr::mem(2),
+                "alias p[1]=p[2] should survive stride-3 seek (both in different lanes)"
+            );
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn seek_stride3_invalidates_same_lane_alias() {
+        // p[3] = p[6]; While([>>>]) { ... }; p[4] = p[3]
+        // p[3] and p[6] are in lane 0 mod 3, same as the seek.
+        // The alias p[3]=p[6] should NOT survive (both could be modified).
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 3,
+                value: Expr::mem(6),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 3,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(3),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(
+                *value,
+                Expr::mem(3),
+                "alias p[3]=p[6] should be invalidated by stride-3 seek (same lane)"
+            );
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn seek_stride1_clears_all_aliases() {
+        // p[1] = p[2]; While([>]) { ... }; p[4] = p[1]
+        // stride=1 can touch any cell, so all aliases should be cleared.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(2),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 1,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 4,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set4 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 4, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set4 {
+            assert_eq!(
+                *value,
+                Expr::mem(1),
+                "alias should be lost with stride-1 seek"
+            );
+        } else {
+            panic!("expected SetMemory at offset 4");
+        }
+    }
+
+    #[test]
+    fn seek_stride2_mixed_lanes() {
+        // p[1] = p[3]; While([>>]) { ... }; p[5] = p[1]
+        // stride=2: even cells touched, odd cells safe.
+        // p[1] is odd (lane 1), p[3] is odd (lane 1) → alias should survive.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(3),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 2,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 5,
+                value: Expr::mem(1),
+            },
+        ];
+        run_copy_prop(&mut nodes);
+        let set5 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 5, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set5 {
+            assert_eq!(
+                *value,
+                Expr::mem(3),
+                "alias p[1]=p[3] should survive stride-2 seek (both odd)"
+            );
+        } else {
+            panic!("expected SetMemory at offset 5");
         }
     }
 }

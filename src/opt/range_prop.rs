@@ -4,6 +4,7 @@ use crate::cond::*;
 use crate::expr::*;
 use crate::math::gcd;
 use crate::nodes::*;
+use crate::opt::alias_oracle;
 use crate::opt::cleanup;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -252,6 +253,16 @@ fn refine_env_false(env: &mut Env, cond: &Cond) {
 
 fn loop_seed_env(env: &Env, body: &[Node]) -> Env {
     let mut seed = env.clone();
+
+    if stride(body) != Some(0) {
+        if let Some(m) = alias_oracle::body_modulus(body) {
+            seed.retain(|&off, _| alias_oracle::cell_disjoint_from_seek(off, m));
+        } else {
+            seed.clear();
+        }
+        return seed;
+    }
+
     for node in body {
         let updates = node.preupdates();
         if updates.unsure.contains(&None) {
@@ -266,6 +277,15 @@ fn loop_seed_env(env: &Env, body: &[Node]) -> Env {
 }
 
 fn invalidate_env_for_body(env: &mut Env, body: &[Node]) {
+    if stride(body) != Some(0) {
+        if let Some(m) = alias_oracle::body_modulus(body) {
+            env.retain(|&off, _| alias_oracle::cell_disjoint_from_seek(off, m));
+        } else {
+            env.clear();
+        }
+        return;
+    }
+
     for node in body {
         let updates = node.preupdates();
         if updates.unsure.contains(&None) {
@@ -397,8 +417,17 @@ fn range_prop_block(children: &mut Vec<Node>, initial_env: &Env) {
                 invalidate_env_for_body(&mut env, body);
             }
 
-            Node::SeekMemory { target, value, .. } => {
-                env.clear();
+            Node::SeekMemory {
+                target,
+                value,
+                stride,
+            } => {
+                let abs_stride = stride.abs();
+                if abs_stride >= 2 {
+                    env.retain(|&off, _| alias_oracle::cell_disjoint_from_seek(off, abs_stride));
+                } else {
+                    env.clear();
+                }
                 env.insert(*target, CellValue::Const(*value));
             }
 
@@ -1534,6 +1563,211 @@ mod tests {
             .find(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
         if let Some(Node::SetMemory { value, .. }) = set1 {
             assert_eq!(*value, Expr::Int(10));
+        } else {
+            panic!("expected SetMemory at offset 1");
+        }
+    }
+
+    // --- Alias oracle integration tests ---
+
+    #[test]
+    fn seek_stride3_preserves_disjoint_constant() {
+        // p[1] = 42; SeekMemory(stride=3); p[2] = p[1]
+        // SeekMemory(stride=3) touches lane 0 only. p[1] is in lane 1 → safe.
+        // p[1] should still be known as 42 after the seek.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(
+                *value,
+                Expr::Int(42),
+                "p[1] should remain 42 after stride-3 seek (lane 1 is disjoint)"
+            );
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn seek_stride3_invalidates_same_lane_constant() {
+        // p[3] = 42; SeekMemory(stride=3); p[1] = p[3]
+        // p[3] is in lane 0 mod 3, same as seek → should be invalidated.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 3,
+                value: Expr::Int(42),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(3),
+            },
+        ];
+        run(&mut nodes);
+        let set1 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set1 {
+            assert_eq!(
+                *value,
+                Expr::mem(3),
+                "p[3] should be unknown after stride-3 seek (same lane)"
+            );
+        } else {
+            panic!("expected SetMemory at offset 1");
+        }
+    }
+
+    #[test]
+    fn seek_stride1_clears_all_constants() {
+        // p[1] = 42; SeekMemory(stride=1); p[2] = p[1]
+        // stride=1 can reach any cell → all must be cleared.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 1,
+                value: 0,
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(
+                *value,
+                Expr::mem(1),
+                "p[1] should be unknown after stride-1 seek"
+            );
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn seek_target_always_set() {
+        // SeekMemory(stride=3, target=0, value=0); p[1] = p[0]
+        // After seek, p[0] should be Const(0) regardless of stride.
+        let mut nodes = vec![
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(0),
+            },
+        ];
+        run(&mut nodes);
+        let set1 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set1 {
+            assert_eq!(*value, Expr::Int(0), "target cell should be known after seek");
+        } else {
+            panic!("expected SetMemory at offset 1");
+        }
+    }
+
+    #[test]
+    fn while_with_seek_preserves_disjoint_env() {
+        // p[1] = 42; While { SeekMemory(stride=3) }; p[2] = p[1]
+        // p[1] is in lane 1, disjoint from stride-3 seek → should survive.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(42),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 3,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::mem(1),
+            },
+        ];
+        run(&mut nodes);
+        let set2 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set2 {
+            assert_eq!(
+                *value,
+                Expr::Int(42),
+                "p[1] should survive while loop with stride-3 seek"
+            );
+        } else {
+            panic!("expected SetMemory at offset 2");
+        }
+    }
+
+    #[test]
+    fn while_with_seek_invalidates_same_lane_env() {
+        // p[6] = 42; While { SeekMemory(stride=3) }; p[1] = p[6]
+        // p[6] is in lane 0, same as stride-3 seek → should be invalidated.
+        let mut nodes = vec![
+            Node::SetMemory {
+                offset: 6,
+                value: Expr::Int(42),
+            },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::SeekMemory {
+                    target: 0,
+                    stride: 3,
+                    value: 0,
+                }],
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::mem(6),
+            },
+        ];
+        run(&mut nodes);
+        let set1 = nodes
+            .iter()
+            .find(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
+        if let Some(Node::SetMemory { value, .. }) = set1 {
+            assert_eq!(
+                *value,
+                Expr::mem(6),
+                "p[6] should be unknown after while with stride-3 seek (same lane)"
+            );
         } else {
             panic!("expected SetMemory at offset 1");
         }

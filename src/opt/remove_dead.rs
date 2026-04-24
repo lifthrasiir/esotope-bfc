@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::nodes::*;
+use crate::opt::alias_oracle;
 use crate::opt::cleanup;
 
 pub fn transform(node: &mut Node) {
@@ -120,16 +121,10 @@ fn visit(node: &mut Node, parent_tail: &TailDead) {
 }
 
 fn seek_congruence_for_node(node: &Node) -> Option<(i32, i32)> {
-    match node {
-        Node::SeekMemory { stride, target, .. } => {
-            let abs_s = stride.abs();
-            if abs_s >= 2 {
-                Some((abs_s, *target))
-            } else {
-                None
-            }
-        }
-        _ => None,
+    if let Node::SeekMemory { target, .. } = node {
+        alias_oracle::seek_modulus(node).map(|m| (m, *target))
+    } else {
+        None
     }
 }
 

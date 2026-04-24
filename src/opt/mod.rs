@@ -1,4 +1,5 @@
 pub mod affine_loop;
+pub mod alias_oracle;
 pub mod cleanup;
 pub mod copy_prop;
 pub mod finite_sim;
