@@ -9,6 +9,7 @@ pub struct Compiler {
     cellsize: u32,
     debugging: bool,
     lower_to_vars: bool,
+    finite_sim_steps: usize,
 }
 
 impl Compiler {
@@ -17,6 +18,7 @@ impl Compiler {
             cellsize,
             debugging,
             lower_to_vars: false,
+            finite_sim_steps: opt::finite_sim::Config::default().max_steps,
         }
     }
 
@@ -24,8 +26,13 @@ impl Compiler {
         self.lower_to_vars = v;
     }
 
+    pub fn set_finite_sim_steps(&mut self, steps: usize) {
+        self.finite_sim_steps = steps;
+    }
+
     pub fn optimize(&self, node: &mut Node) {
         opt::flatten::transform(node);
+        opt::finite_sim::transform(node, self.cellsize, self.finite_sim_steps);
         opt::simple_loop::transform(node, self.cellsize);
         opt::initial_memory::transform(node);
         opt::propagate::transform(node, self.cellsize);
@@ -169,6 +176,39 @@ mod tests {
         assert!(
             !output.contains("while (1); /* infinite loop */"),
             "bad.b should not compile to a spurious infinite loop: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn non_zero_stride_loop_simulates_to_hello_world() {
+        let src = ">++++++++[-<+++++++++>]<.>[][<-]>+>-[+]++>++>+++[>[->+++<<+++>]<<]>-----.
+                   >->+++..+++.>-.<<+[>[+>+]>>]<--------------.>>.+++.------.--------.>+.>+.";
+        let output = compile_bf(src);
+        assert!(
+            output.contains("PUTS(\"Hello World!\\n\")"),
+            "bad.b should compile to direct Hello World output: {}",
+            output
+        );
+        assert!(
+            !output.contains("PUTC("),
+            "bad.b output should be collapsed to a constant string: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn finite_sim_steps_are_configurable() {
+        let mut compiler = Compiler::new(8, false);
+        compiler.set_finite_sim_steps(1);
+        let mut out = Vec::new();
+        compiler
+            .compile(BufReader::new("+++.".as_bytes()), &mut out, "brainfuck")
+            .unwrap();
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("PUTS(\"\\003\")"),
+            "finite-sim step setting should still produce valid optimized output: {}",
             output
         );
     }

@@ -42,6 +42,9 @@ Options:
 --lower-to-vars
     When the program uses a finite set of cells, lower the memory
     array to individual variables in the generated C code.
+--finite-sim-steps N
+    Runs input-independent code directly for up to N steps during
+    optimization. Defaults to 100000.
 
 For more information please visit http://esotope-bfc.googlecode.com/.
 "#,
@@ -58,6 +61,7 @@ fn main() {
     let mut _verbose = false;
     let mut debugging = false;
     let mut lower_to_vars = false;
+    let mut finite_sim_steps: usize = opt::finite_sim::Config::default().max_steps;
     let mut filename: Option<String> = None;
 
     let mut i = 1;
@@ -116,6 +120,20 @@ fn main() {
             "--lower-to-vars" => {
                 lower_to_vars = true;
             }
+            "--finite-sim-steps" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --finite-sim-steps requires an argument");
+                    process::exit(1);
+                }
+                match args[i].parse::<usize>() {
+                    Ok(steps) => finite_sim_steps = steps,
+                    _ => {
+                        eprintln!("Error: Invalid finite simulation step count {:?}.", args[i]);
+                        process::exit(1);
+                    }
+                }
+            }
             s if s.starts_with('-') && s.len() > 1 && s != "-" => {
                 eprintln!("Error: Unknown option {}.", s);
                 eprintln!("Type \"{} --help\" for usage.", progname);
@@ -158,6 +176,7 @@ fn main() {
 
     let mut compiler = Compiler::new(cellsize, debugging);
     compiler.set_lower_to_vars(lower_to_vars);
+    compiler.set_finite_sim_steps(finite_sim_steps);
     let mut stdout = io::stdout().lock();
 
     match compiler.compile(reader, &mut stdout, &informat) {
