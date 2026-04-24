@@ -68,6 +68,17 @@ impl TailDead {
         *self = TailDead::none();
     }
 
+    fn retain_disjoint(&mut self, modulus: i32, residue: i32) {
+        match self {
+            TailDead::All | TailDead::AllExcept(_) => {
+                *self = TailDead::none();
+            }
+            TailDead::Set(dead) => {
+                dead.retain(|cell| cell.rem_euclid(modulus) != residue);
+            }
+        }
+    }
+
     fn shift(&self, offset: i32) -> TailDead {
         if offset == 0 {
             return self.clone();
@@ -108,6 +119,47 @@ fn visit(node: &mut Node, parent_tail: &TailDead) {
     }
 }
 
+fn seek_congruence_for_node(node: &Node) -> Option<(i32, i32)> {
+    match node {
+        Node::SeekMemory { stride, target, .. } => {
+            let abs_s = stride.abs();
+            if abs_s >= 2 {
+                Some((abs_s, *target))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn invalidate_for_unknown_refs(
+    unusedcells: &mut BTreeMap<i32, usize>,
+    unusednodes: &mut BTreeSet<usize>,
+    modulus: Option<i32>,
+    base: i32,
+) {
+    match modulus {
+        Some(m) if m >= 2 => {
+            let residue = base.rem_euclid(m);
+            let to_remove: Vec<i32> = unusedcells
+                .keys()
+                .filter(|&&cell| cell.rem_euclid(m) == residue)
+                .copied()
+                .collect();
+            for cell in to_remove {
+                if let Some(idx) = unusedcells.remove(&cell) {
+                    unusednodes.remove(&idx);
+                }
+            }
+        }
+        _ => {
+            unusedcells.clear();
+            unusednodes.clear();
+        }
+    }
+}
+
 fn compute_child_tails(children: &[Node], block_dead: &TailDead) -> Vec<TailDead> {
     let n = children.len();
     if n == 0 {
@@ -132,7 +184,12 @@ fn compute_child_tails(children: &[Node], block_dead: &TailDead) -> Vec<TailDead
     for i in (0..n).rev() {
         if barriers[i] {
             result[i] = dead.shift(-cum[i]);
-            dead.reset();
+            if let Some((modulus, target)) = seek_congruence_for_node(&children[i]) {
+                let residue = (cum[i] + target).rem_euclid(modulus);
+                dead.retain_disjoint(modulus, residue);
+            } else {
+                dead.reset();
+            }
             continue;
         }
 
@@ -142,7 +199,12 @@ fn compute_child_tails(children: &[Node], block_dead: &TailDead) -> Vec<TailDead
         let writes = children[i].preupdates().sure;
 
         if reads.contains(&None) || writes.contains(&None) {
-            dead.reset();
+            if let Some((modulus, target)) = seek_congruence_for_node(&children[i]) {
+                let residue = (cum[i] + target).rem_euclid(modulus);
+                dead.retain_disjoint(modulus, residue);
+            } else {
+                dead.reset();
+            }
         } else {
             for u in writes.iter().flatten() {
                 dead.mark_dead(*u + cum[i]);
@@ -164,11 +226,17 @@ fn remove_dead_pass(children: &mut Vec<Node>, tail_dead: &TailDead) {
     let mut offsets: i32 = 0;
 
     for i in 0..children.len() {
+        let seek_cong = seek_congruence_for_node(&children[i]);
+
         if let Some(o) = children[i].offsets() {
             offsets += o;
         } else {
-            unusedcells.clear();
-            unusednodes.clear();
+            invalidate_for_unknown_refs(
+                &mut unusedcells,
+                &mut unusednodes,
+                seek_cong.map(|(m, _)| m),
+                offsets + seek_cong.map_or(0, |(_, t)| t),
+            );
         }
 
         let pure = children[i].is_pure() && children[i].returns();
@@ -185,8 +253,12 @@ fn remove_dead_pass(children: &mut Vec<Node>, tail_dead: &TailDead) {
         }
 
         if irefs.contains(&None) {
-            unusedcells.clear();
-            unusednodes.clear();
+            invalidate_for_unknown_refs(
+                &mut unusedcells,
+                &mut unusednodes,
+                seek_cong.map(|(m, _)| m),
+                offsets + seek_cong.map_or(0, |(_, t)| t),
+            );
         } else {
             for j in irefs.iter().flatten() {
                 let j = j + offsets;
@@ -506,6 +578,157 @@ mod tests {
         assert!(
             result.iter().any(|n| matches!(n, Node::If { .. })),
             "If with Output should be preserved: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn seek_stride3_preserves_disjoint_dead_store() {
+        // p[1] = 5; SeekMemory(stride=3); (end of program)
+        // SeekMemory(stride=3) reads cells at offsets 0, 3, 6, ...
+        // p[1] is in lane 1 mod 3, disjoint from lane 0 mod 3
+        // So p[1] = 5 should still be recognized as dead at program end
+        let nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(5),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+        ];
+        let result = run_remove_dead(nodes);
+        assert!(
+            !result
+                .iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+            "dead store in disjoint lane should be removed after SeekMemory: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn seek_stride3_preserves_same_lane_store() {
+        // p[0] = 5; SeekMemory(stride=3, target=0); Output(p[0])
+        // SeekMemory reads cells at offsets 0, 3, 6, ...
+        // p[0] is in lane 0 mod 3, same as the seek lane
+        // So p[0] = 5 must be preserved (it's read by SeekMemory)
+        let nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(5),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+            Node::Output { expr: Expr::mem(0) },
+        ];
+        let result = run_remove_dead(nodes);
+        assert!(
+            result
+                .iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 0, .. })),
+            "store in same lane as SeekMemory should be preserved: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn seek_stride1_clears_all() {
+        // SeekMemory(stride=1) can reach any cell, so all tracking must be cleared
+        // p[1] = 5; SeekMemory(stride=1); (but p[1] might be read by seek)
+        let nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(5),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 1,
+                value: 0,
+            },
+            Node::Output { expr: Expr::mem(0) },
+        ];
+        let result = run_remove_dead(nodes);
+        assert!(
+            result
+                .iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+            "store should be preserved with stride=1 (no congruence info): {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn seek_stride3_dead_at_program_end_disjoint_lanes() {
+        // p[0] = 1; p[1] = 2; p[2] = 3; SeekMemory(stride=3); (program end)
+        // Seek reads lane 0 mod 3. After seek, all stores are dead (program end).
+        // But the seek itself reads lane 0 cells, making p[0] = 1 live.
+        // p[1] and p[2] are in different lanes so remain dead.
+        let nodes = vec![
+            Node::SetMemory {
+                offset: 0,
+                value: Expr::Int(1),
+            },
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(2),
+            },
+            Node::SetMemory {
+                offset: 2,
+                value: Expr::Int(3),
+            },
+            Node::SeekMemory {
+                target: 0,
+                stride: 3,
+                value: 0,
+            },
+        ];
+        let result = run_remove_dead(nodes);
+        let has_offset_1 = result
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 1, .. }));
+        let has_offset_2 = result
+            .iter()
+            .any(|n| matches!(n, Node::SetMemory { offset: 2, .. }));
+        assert!(
+            !has_offset_1,
+            "p[1] (lane 1) should be dead after stride-3 seek at program end: {:?}",
+            result
+        );
+        assert!(
+            !has_offset_2,
+            "p[2] (lane 2) should be dead after stride-3 seek at program end: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn dynamic_pointer_fallback_preserves_behavior() {
+        // A While with non-zero stride is also a barrier, but not a SeekMemory
+        // All tracking should be cleared (fallback)
+        let nodes = vec![
+            Node::SetMemory {
+                offset: 1,
+                value: Expr::Int(5),
+            },
+            Node::Input { offset: 0 },
+            Node::While {
+                cond: Cond::MemNotEqual(0, 0),
+                children: vec![Node::MovePointer { offset: 1 }],
+            },
+            Node::Output { expr: Expr::mem(1) },
+        ];
+        let result = run_remove_dead(nodes);
+        assert!(
+            result
+                .iter()
+                .any(|n| matches!(n, Node::SetMemory { offset: 1, .. })),
+            "store should be preserved with dynamic pointer (non-SeekMemory): {:?}",
             result
         );
     }

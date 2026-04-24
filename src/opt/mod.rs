@@ -6,6 +6,7 @@ pub mod flatten;
 pub mod initial_memory;
 pub mod mem_layout;
 pub mod more_loop;
+pub mod pointer_congruence;
 pub mod propagate;
 pub mod range_prop;
 pub mod remove_dead;
