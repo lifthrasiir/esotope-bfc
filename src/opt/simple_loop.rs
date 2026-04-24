@@ -1,25 +1,8 @@
 use crate::cond::*;
 use crate::expr::*;
+use crate::math::gcdex;
 use crate::nodes::*;
 use crate::opt::cleanup;
-
-fn gcdex(mut x: i32, mut y: i32) -> (i32, i32, i32) {
-    let (mut a, mut b) = (0i32, 1i32);
-    let (mut c, mut d) = (1i32, 0i32);
-    while x != 0 {
-        let q = y / x;
-        let r = y % x;
-        let u = a - c * q;
-        let v = b - d * q;
-        y = x;
-        x = r;
-        a = c;
-        b = d;
-        c = u;
-        d = v;
-    }
-    (a, b, y)
-}
 
 pub fn transform(node: &mut Node, cellsize: u32) {
     visit(node, cellsize);

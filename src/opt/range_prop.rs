@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::cond::*;
 use crate::expr::*;
+use crate::math::gcd;
 use crate::nodes::*;
 use crate::opt::cleanup;
 
@@ -12,16 +13,6 @@ enum CellValue {
 }
 
 type Env = BTreeMap<i32, CellValue>;
-
-fn gcd(a: i32, b: i32) -> i32 {
-    let (mut a, mut b) = (a.abs(), b.abs());
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
-}
 
 fn mem_offset(expr: &Expr) -> Option<i32> {
     if let Expr::Reference(inner) = expr {

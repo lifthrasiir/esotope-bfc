@@ -2,6 +2,7 @@ mod codegen;
 mod compiler;
 mod cond;
 mod expr;
+mod math;
 mod memstate;
 mod nodes;
 mod opt;
