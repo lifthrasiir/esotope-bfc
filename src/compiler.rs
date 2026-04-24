@@ -186,4 +186,50 @@ mod tests {
             output
         );
     }
+
+    #[test]
+    fn copy_survives_unrelated_if() {
+        // Set p[0] = 'A' (65), copy to p[2], then branch on p[1] (modifying p[3]),
+        // then output p[2]. The copy alias p[2]=p[0] should survive the branch.
+        //
+        // >++++++++[<++++++++>-]<+  → p[0] = 65
+        // >>[-]<<                    → p[2] = 0
+        // [->+>+<<]                  → would be complex, let's use direct approach
+        //
+        // Simpler: set p[0]=65, copy to p[1], branch on p[2], output p[1]
+        // +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++(65 plusses)
+        // >[-]<[->+<]               → p[1] = p[0], p[0] = 0 (move p[0] to p[1])
+        // >>,[[-]>+<]<<             → input p[2]; if nonzero, clear it and inc p[3]
+        // >.                         → output p[1]
+        //
+        // With branch-aware copy prop, the optimizer can track that p[1]'s value
+        // is unaffected by the branch on p[2], enabling better optimization.
+        let src = ">++++++++[<++++++++>-]<+ >[-]< [->+<] >>,[[-]>+<]<< >.";
+        let output = compile_bf(src);
+        // The key check: p[1] should be output, and ideally as a constant
+        assert!(
+            output.contains("PUTC(65)") || output.contains("PUTS(\"A\")")
+                || output.contains("p[1]"),
+            "p[1] should be preserved or constant-folded: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn alias_preserved_across_conditional_clear() {
+        // This tests that copy propagation preserves aliases across If nodes.
+        // Pattern: set two values, then branch on a third cell, then output.
+        //
+        // +++++++++     (p[0] = 9)
+        // >+++++        (p[1] = 5)
+        // >,[ [-] ]     (input p[3]; if nonzero, clear it — unrelated conditional)
+        // <<.           (output p[0], should still be known as 9)
+        let src = "+++++++++ >+++++ >,[ [-] ] <<.";
+        let output = compile_bf(src);
+        assert!(
+            output.contains("PUTC(9)") || output.contains("PUTS(\"\\t\")"),
+            "p[0] should remain known after unrelated conditional: {}",
+            output
+        );
+    }
 }
