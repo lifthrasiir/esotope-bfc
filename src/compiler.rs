@@ -28,10 +28,10 @@ impl Compiler {
         opt::flatten::transform(node);
         opt::simple_loop::transform(node, self.cellsize);
         opt::initial_memory::transform(node);
-        opt::propagate::transform(node);
+        opt::propagate::transform(node, self.cellsize);
         opt::more_loop::transform(node);
         opt::simple_loop::transform(node, self.cellsize);
-        opt::propagate::transform(node);
+        opt::propagate::transform(node, self.cellsize);
         opt::more_loop::transform(node);
         opt::affine_loop::transform(node, self.cellsize);
         opt::copy_prop::transform(node);
@@ -364,6 +364,42 @@ mod tests {
             output.contains("PUTC(") || output.contains("p[2]") || output.contains("p[0]"),
             "live move should produce output code: {}",
             output
+        );
+    }
+
+    #[test]
+    fn bad_program_regression_puts_once_with_exact_message() {
+        let src = "
+            >[-]<[-]++++++[->+++++++++++<]>+.-[---<+++++>]<+.--.+++.+++++.-.>+++++[<
+            ---->-]<+.->+++++[<++++>-]<.-----------.++++++.-.--[--->+<]>----.+++++[-
+            <+++>]<.---------.[--->+<]>--.---[-<++++>]<.------------.---.--[--->+<]>
+            -.+[-<+++>]<++.++++.--.+.++++++++++++.------------.--[--->+<]>--.+++[-<+
+            ++>]<.++++.+++.-----------.--..--.+.++++++++++.-------.--[--->+<]>-.++++
+            [-<+++>]<++.+++++++.--------.-----------.+++.+++++++++++++.[--->+<]>----
+            --.[-<+++>]<+.+.+++++++++++++.+++.++.---------------.-.-[--->+<]>-.+[-<+
+            ++>]<+.+>++++[<++++>-]<.>++++[<---->-]<.--[--->+<]>-.---[-<++++>]<.-----
+            .[--->+<]>-----.---[-<++++>]<.------------.---.--[--->+<]>-.+++[-<+++>]<
+            .++++..----.+++++.---------.+++++++++.++++++.[---->+<]>+++.+[-<+++>]<++.
+            +++++++++.----------.-[--->+<]>-.+++++[-<+++>]<.---------.[--->+<]>--.--
+            -[-<++++>]<.------------.---.--[--->+<]>-.---[-<++++>]<+.-------.-----.+
+            ++++++++++++.>++++[<---->-]<-.+++++++++++++.+.--------------.-[-->+<]>--
+            --.[-]++++++++++.[-]<
+        ";
+        let output = compile_bf(src);
+        assert_eq!(
+            output.matches("PUTS(\"").count(),
+            1,
+            "expected single PUTS call: {output}"
+        );
+        assert!(
+            !output.contains("PUTC("),
+            "expected no PUTC calls: {output}"
+        );
+        assert!(
+            output.contains(
+                "PUTS(\"Computation of the eighth impeccable number aborted due to the imminent end of the universe.\\n\")"
+            ),
+            "expected exact PUTS message: {output}"
         );
     }
 }

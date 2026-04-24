@@ -5,27 +5,120 @@ use crate::expr::*;
 use crate::nodes::*;
 use crate::opt::cleanup;
 
-pub fn transform(node: &mut Node) {
-    visit(node);
+pub fn transform(node: &mut Node, cellsize: u32) {
+    visit(node, cellsize);
 }
 
-fn visit(node: &mut Node) {
+fn visit(node: &mut Node, cellsize: u32) {
     if let Some(children) = node.children_mut() {
         for child in children.iter_mut() {
-            visit(child);
+            visit(child, cellsize);
         }
-        propagate_pass(children);
+        propagate_pass(children, cellsize);
     }
 }
 
-fn propagate_pass(children: &mut Vec<Node>) {
+fn wrap_value(value: i64, cellsize: u32) -> i64 {
+    if cellsize >= 63 {
+        value
+    } else {
+        let modulus = 1i64 << cellsize;
+        value.rem_euclid(modulus)
+    }
+}
+
+fn wrap_to_expr_int(value: i64, cellsize: u32) -> i32 {
+    let wrapped = wrap_value(value, cellsize);
+    if cellsize == 32 {
+        wrapped as u32 as i32
+    } else {
+        wrapped as i32
+    }
+}
+
+fn eval_expr(expr: &Expr, known: &BTreeMap<i32, i64>) -> Option<i64> {
+    match expr {
+        Expr::Int(v) => Some(*v as i64),
+        Expr::Reference(offset) => {
+            let off = eval_expr(offset, known)?;
+            let off = i32::try_from(off).ok()?;
+            known.get(&off).copied()
+        }
+        Expr::Linear(lin) => {
+            let mut total = lin.constant as i64;
+            for (coeff, term) in &lin.terms {
+                total += (*coeff as i64) * eval_expr(term, known)?;
+            }
+            Some(total)
+        }
+        Expr::Multiply(factors) => {
+            let mut total = 1i64;
+            for factor in factors {
+                total *= eval_expr(factor, known)?;
+            }
+            Some(total)
+        }
+        Expr::Division(lhs, rhs) => {
+            let l = eval_expr(lhs, known)?;
+            let r = eval_expr(rhs, known)?;
+            Some(l.div_euclid(r))
+        }
+        Expr::ExactDivision(lhs, rhs) => {
+            let l = eval_expr(lhs, known)?;
+            let r = eval_expr(rhs, known)?;
+            if r == 0 || l % r != 0 {
+                None
+            } else {
+                Some(l / r)
+            }
+        }
+        Expr::Modulo(lhs, rhs) => {
+            let l = eval_expr(lhs, known)?;
+            let r = eval_expr(rhs, known)?;
+            Some(l.rem_euclid(r))
+        }
+    }
+}
+
+fn propagate_pass(children: &mut Vec<Node>, cellsize: u32) {
     let mut backrefs: BTreeMap<i32, usize> = BTreeMap::new();
     let mut usedrefs: BTreeMap<i32, usize> = BTreeMap::new();
     let mut substs: BTreeMap<i32, Expr> = BTreeMap::new();
+    let mut known_values: BTreeMap<i32, i64> = BTreeMap::new();
 
     let mut i = 0;
     while i < children.len() {
-        children[i].with_memory(&substs);
+        let known_output = match &children[i] {
+            Node::Output { expr } => {
+                eval_expr(expr, &known_values).map(|v| wrap_to_expr_int(v, cellsize))
+            }
+            _ => None,
+        };
+        let known_set = match &children[i] {
+            Node::SetMemory { offset, value } => eval_expr(value, &known_values).map(|v| {
+                (
+                    *offset,
+                    wrap_value(v, cellsize),
+                    wrap_to_expr_int(v, cellsize),
+                )
+            }),
+            _ => None,
+        };
+
+        if let Some(value) = known_output {
+            children[i] = Node::Output {
+                expr: Expr::Int(value),
+            };
+        } else if let Some((offset, wrapped_i64, wrapped_i32)) = known_set {
+            children[i] = Node::SetMemory {
+                offset,
+                value: Expr::Int(wrapped_i32),
+            };
+            substs.insert(offset, Expr::Int(wrapped_i32));
+            known_values.insert(offset, wrapped_i64);
+        } else {
+            children[i].with_memory(&substs);
+        }
 
         let mut alters = false;
         let mut mergable = false;
@@ -41,6 +134,11 @@ fn propagate_pass(children: &mut Vec<Node>) {
                 let delta = value - &Expr::mem(o);
                 if value.is_simple() {
                     substs.insert(o, value.clone());
+                    if let Some(v) = value.to_int() {
+                        known_values.insert(o, wrap_value(v as i64, cellsize));
+                    } else {
+                        known_values.remove(&o);
+                    }
                 } else if delta.is_simple() {
                     if let Some(existing) = substs.get_mut(&o) {
                         *existing = &*existing + &delta;
@@ -54,28 +152,34 @@ fn propagate_pass(children: &mut Vec<Node>) {
                             substs.remove(&o);
                         }
                     }
+                    known_values.remove(&o);
                 } else {
                     substs.remove(&o);
+                    known_values.remove(&o);
                 }
             }
             Node::Input { offset: o } => {
                 alters = true;
                 offset = Some(*o);
                 substs.remove(o);
+                known_values.remove(o);
             }
             Node::Output { .. } => {}
             _ => {
                 backrefs.clear();
                 usedrefs.clear();
                 substs.clear();
+                known_values.clear();
                 match &children[i] {
                     Node::While { cond, .. } | Node::If { cond, .. } => {
                         if let Cond::MemNotEqual(target, value) = cond {
                             substs.insert(*target, Expr::Int(*value));
+                            known_values.insert(*target, wrap_value(*value as i64, cellsize));
                         }
                     }
                     Node::SeekMemory { target, value, .. } => {
                         substs.insert(*target, Expr::Int(*value));
+                        known_values.insert(*target, wrap_value(*value as i64, cellsize));
                     }
                     _ => {}
                 }

@@ -341,15 +341,17 @@ impl Expr {
 
         for (coeff, term) in terms {
             match &term {
-                Expr::Int(v) => c += coeff * v,
+                Expr::Int(v) => c = c.wrapping_add(coeff.wrapping_mul(*v)),
                 Expr::Linear(lin) => {
-                    c += coeff * lin.constant;
+                    c = c.wrapping_add(coeff.wrapping_mul(lin.constant));
                     for (icoeff, iterm) in &lin.terms {
-                        *termsmap.entry(iterm.clone()).or_insert(0) += coeff * icoeff;
+                        let entry = termsmap.entry(iterm.clone()).or_insert(0);
+                        *entry = entry.wrapping_add(coeff.wrapping_mul(*icoeff));
                     }
                 }
                 _ => {
-                    *termsmap.entry(term).or_insert(0) += coeff;
+                    let entry = termsmap.entry(term).or_insert(0);
+                    *entry = entry.wrapping_add(coeff);
                 }
             }
         }
@@ -379,10 +381,10 @@ impl Expr {
 
         for term in terms {
             if let Some(v) = term.to_int() {
-                factor *= v;
+                factor = factor.wrapping_mul(v);
             } else if let Expr::Linear(ref lin) = term {
                 if lin.terms.len() == 1 && lin.constant == 0 {
-                    factor *= lin.terms[0].0;
+                    factor = factor.wrapping_mul(lin.terms[0].0);
                     let inner = lin.terms[0].1.clone();
                     match inner {
                         Expr::Multiply(factors) => realterms.extend(factors),
@@ -713,5 +715,17 @@ mod tests {
         } else {
             // Could also be linear with multiply inside, which is fine
         }
+    }
+
+    #[test]
+    fn linear_uses_wrapping_arithmetic() {
+        let r = Expr::linear(i32::MAX, vec![(2, Expr::Int(1))]);
+        assert_eq!(r, Expr::Int(i32::MIN + 1));
+    }
+
+    #[test]
+    fn multiply_uses_wrapping_arithmetic() {
+        let r = Expr::multiply(vec![Expr::Int(i32::MAX), Expr::Int(2)]);
+        assert_eq!(r, Expr::Int(-2));
     }
 }
